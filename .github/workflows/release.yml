@@ -1,28 +1,30 @@
-name: Build and Release
+name: Build Release
 
 on:
-  push:
-    tags:
-      - '*'
+  release:
+    types: [published]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        arch: [amd64, arm64]
+    
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-
-      - name: Build
+      
+      - name: Build binaries
         run: |
-          TAG=${GITHUB_REF#refs/tags/}
-          GOOS=linux GOARCH=${{ matrix.arch }} go build -ldflags="-s -w" -o downonly-linux-${{ matrix.arch }}-${TAG} main.go
-
-      - name: Release
+          VERSION=${GITHUB_REF_NAME}
+          
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o downonly-linux-amd64-${VERSION} main.go
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o downonly-linux-arm64-${VERSION} main.go
+      
+      - name: Upload to release
         uses: softprops/action-gh-release@v1
         with:
           files: downonly-*
