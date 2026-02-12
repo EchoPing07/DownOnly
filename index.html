@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DownOnly</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg width='512' height='512' viewBox='0 0 512 512' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='512' height='512' rx='112' fill='%233b82f6'/%3E%3Cg stroke='%23ffffff' stroke-width='28' stroke-linecap='round'%3E%3Cpath d='M120 256C120 180.89 180.89 120 256 120C300 120 338 140 365 172' /%3E%3Cpath d='M392 256C392 331.11 331.11 392 256 392C212 392 174 372 147 340' /%3E%3Cpath d='M185 256C185 216.79 216.79 185 256 185C280 185 302 198 315 218' /%3E%3Cpath d='M327 256C327 295.21 295.21 327 256 327C232 327 210 314 197 294' /%3E%3Ccircle cx='256' cy='256' r='14' fill='%23ffffff' stroke='none'/%3E%3C/g%3E%3C/svg%3E">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: { extend: { colors: { primary: '#3b82f6', dark: '#0f172a', cardDark: '#1e293b' } } }
+        }
+    </script>
+    <style>
+        body { transition: background-color 0.3s, color 0.3s; }
+        .modal-blur { backdrop-filter: blur(8px); }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+        input[type="time"]::-webkit-calendar-picker-indicator { display: none; }
+        input[type="time"] { -webkit-appearance: none; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-800 dark:bg-dark dark:text-slate-200 min-h-screen flex flex-col relative antialiased">
+
+    <!-- 顶栏 -->
+    <nav class="sticky top-0 z-40 bg-white/80 dark:bg-cardDark/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800">
+        <div class="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
+            <div class="flex items-center gap-3">
+                <div class="w-8 h-8 text-primary">
+                    <svg viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <g stroke="currentColor" stroke-width="40" stroke-linecap="round">
+                            <path d="M120 256C120 180.89 180.89 120 256 120C300 120 338 140 365 172"/>
+                            <path d="M392 256C392 331.11 331.11 392 256 392C212 392 174 372 147 340"/>
+                            <path d="M185 256C185 216.79 216.79 185 256 185C280 185 302 198 315 218"/>
+                            <path d="M327 256C327 295.21 295.21 327 256 327C232 327 210 314 197 294"/>
+                            <circle cx="256" cy="256" r="20" fill="currentColor" stroke="none"/>
+                        </g>
+                    </svg>
+                </div>
+                <span class="font-bold text-xl tracking-tight">DownOnly</span>
+            </div>
+            <div class="flex items-center gap-1">
+                <button onclick="toggleTheme()" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-500 hover:text-yellow-500">
+                    <span class="dark:hidden"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M8 12a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/></svg></span>
+                    <span class="hidden dark:block"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454l0 .008"/></svg></span>
+                </button>
+                <button onclick="toggleModal('log-modal')" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-white">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M5 7l5 5l-5 5"/><path d="M12 19l7 0"/></svg>
+                </button>
+                <button onclick="toggleModal('config-modal')" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-500 hover:text-primary dark:text-slate-400 dark:hover:text-primary">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/></svg>
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- 主内容 -->
+    <main class="flex-1 max-w-5xl mx-auto px-4 py-8 w-full space-y-6">
+        <section class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- 系统状态 -->
+            <div class="bg-white dark:bg-cardDark p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm relative overflow-hidden h-48 flex flex-col justify-between">
+                <div class="z-10">
+                    <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-1">运行状态</h2>
+                    <div class="flex items-center gap-2">
+                        <span class="text-2xl font-bold text-slate-400" id="status-text">已停用</span>
+                        <div id="status-indicator" class="w-2 h-2 rounded-full bg-slate-300 mt-0.5 transition-all"></div>
+                    </div>
+                </div>
+                <div class="z-10 mb-1">
+                    <div class="text-[10px] text-slate-400 font-bold uppercase tracking-tight">运行时长</div>
+                    <div class="font-mono text-xl font-bold text-primary" id="uptime-display">00:00:00</div>
+                </div>
+                <button onclick="toggleService()" id="power-btn" class="absolute bottom-6 right-6 w-14 h-14 bg-primary hover:bg-blue-600 text-white rounded-2xl flex items-center justify-center transition-all active:scale-95 shadow-lg shadow-blue-500/20 z-20">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M6 4v16a1 1 0 0 0 1.524 .852l13 -8a1 1 0 0 0 0 -1.704l-13 -8a1 1 0 0 0 -1.524 .852z"/></svg>
+                </button>
+                <div class="absolute -right-2 -top-2 opacity-[0.05] dark:opacity-[0.1] text-slate-500 transform rotate-12 pointer-events-none">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"/><path d="M7 11l5 5l5 -5"/><path d="M12 4l0 12"/></svg>
+                </div>
+            </div>
+            <!-- 今日消耗 -->
+            <div class="md:col-span-2 bg-white dark:bg-cardDark p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between h-48">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">今日已消耗</h2>
+                        <div class="flex items-baseline gap-2 mt-1">
+                            <span class="text-5xl font-bold tracking-tighter" id="today-total">0.00</span>
+                            <span class="text-sm font-bold text-slate-400">GB</span>
+                        </div>
+                    </div>
+                    <div class="text-right">
+                        <div class="text-[10px] font-bold uppercase tracking-widest text-emerald-500">实时速率</div>
+                        <div class="text-3xl font-bold font-mono tracking-tighter text-emerald-500" id="speed-val">0.0</div>
+                        <div class="text-[10px] text-slate-400 font-semibold">Mbps</div>
+                    </div>
+                </div>
+                <div class="h-20 w-full -mb-3"><canvas id="liveChart"></canvas></div>
+            </div>
+        </section>
+
+        <!-- 本月历史 -->
+        <section class="bg-white dark:bg-cardDark p-6 md:p-8 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm">
+            <div class="flex justify-between items-start mb-8">
+                <div>
+                    <h2 class="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">本月总计流量</h2>
+                    <div class="flex items-baseline gap-2 mt-1">
+                        <span class="text-5xl font-bold tracking-tighter text-slate-800 dark:text-slate-100" id="month-total">0.00</span>
+                        <span class="text-sm font-bold text-slate-400" id="month-unit">GB</span>
+                    </div>
+                </div>
+                <div class="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl mt-1">
+                    <button onclick="changeMonth(-1)" class="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white dark:hover:bg-slate-700 text-slate-400 transition-all shadow-sm">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M15 6l-6 6l6 6"/></svg>
+                    </button>
+                    <span class="text-xs font-bold px-2 text-center min-w-[3em]" id="month-display">--</span>
+                    <button onclick="changeMonth(1)" class="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white dark:hover:bg-slate-700 text-slate-400 transition-all shadow-sm">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M9 6l6 6l-6 6"/></svg>
+                    </button>
+                </div>
+            </div>
+            <div class="h-56 w-full"><canvas id="historyChart"></canvas></div>
+        </section>
+    </main>
+
+    <!-- 日志弹窗 -->
+    <div id="log-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4 modal-blur">
+        <div class="absolute inset-0 bg-slate-900/60 transition-opacity" onclick="toggleModal('log-modal')"></div>
+        <div class="relative w-full max-w-2xl h-[70vh] bg-white dark:bg-slate-950 rounded-3xl border border-slate-200 dark:border-white/10 shadow-2xl overflow-hidden flex flex-col transform transition-all scale-95 opacity-0 modal-content">
+            <div class="flex justify-between items-center p-5 border-b border-slate-100 dark:border-white/5 bg-slate-50 dark:bg-slate-900/50">
+                <span class="text-sm font-bold tracking-wide dark:text-white">日志</span>
+                <button onclick="toggleModal('log-modal')" class="text-slate-400 hover:text-slate-600 dark:hover:text-white">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M18 6l-12 12"/><path d="M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="flex-1 p-6 overflow-y-auto font-mono text-xs space-y-2 no-scrollbar" id="console-logs">
+                <div class="text-slate-300 dark:text-slate-600 text-center py-8">等待连接后端...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 配置弹窗 -->
+    <div id="config-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4 modal-blur">
+        <div class="absolute inset-0 bg-slate-900/30 dark:bg-slate-900/60 transition-opacity" onclick="toggleModal('config-modal')"></div>
+        <div class="relative w-full max-w-md bg-white dark:bg-cardDark rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden transform transition-all scale-95 opacity-0 modal-content max-h-[85vh] overflow-y-auto">
+            <div class="flex justify-between items-center p-6 border-b border-slate-100 dark:border-slate-800 sticky top-0 bg-white dark:bg-cardDark z-10">
+                <h3 class="font-bold text-lg">策略配置</h3>
+                <button onclick="toggleModal('config-modal')" class="text-slate-400 hover:text-slate-600 dark:hover:text-white">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M18 6l-12 12"/><path d="M6 6l12 12"/></svg>
+                </button>
+            </div>
+            <div class="p-6 space-y-6">
+                <div>
+                    <div class="flex justify-between items-baseline px-1 mb-3">
+                        <span class="text-[11px] font-bold text-slate-400 uppercase">下载速率限制</span>
+                        <span class="text-sm font-bold text-primary"><span id="conf-speed">5</span> Mbps</span>
+                    </div>
+                    <input id="conf-speed-slider" type="range" min="1" max="256" value="5" class="w-full h-1.5 bg-slate-100 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer accent-primary" oninput="document.getElementById('conf-speed').innerText=this.value">
+                    <div class="flex justify-between text-[9px] text-slate-300 dark:text-slate-600 mt-1 px-1">
+                        <span>1 Mbps</span><span>256 Mbps</span>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-[11px] font-bold text-slate-400 uppercase mb-2 px-1">每天流量限额</label>
+                    <div class="relative">
+                        <input id="conf-quota" type="number" value="200" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                        <span class="absolute right-4 top-3.5 text-xs font-bold text-slate-300">GB</span>
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-[11px] font-bold text-slate-400 uppercase mb-2 px-1">运行时间</label>
+                    <div class="flex items-center gap-3">
+                        <input id="conf-start" type="time" value="00:00" class="flex-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                        <span class="text-slate-300 text-sm font-bold">至</span>
+                        <input id="conf-end" type="time" value="23:59" class="flex-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                    </div>
+                </div>
+                <div>
+                    <label class="block text-[11px] font-bold text-slate-400 uppercase mb-2 px-1">资源地址（每行一个）</label>
+                    <textarea id="conf-urls" class="w-full h-28 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-4 text-xs font-mono leading-relaxed resize-none focus:ring-1 focus:ring-primary focus:border-primary outline-none" placeholder="每行填入一个下载直链..."></textarea>
+                </div>
+            </div>
+            <div class="p-6 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
+                <button onclick="saveConfig()" class="w-full py-3 bg-primary hover:bg-blue-600 text-white rounded-2xl text-sm font-bold shadow-lg shadow-blue-500/20 transition-all active:scale-[0.98]">
+                    应用并生效
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        /* ========== 常量 ========== */
+        const SVG_PLAY = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M6 4v16a1 1 0 0 0 1.524 .852l13 -8a1 1 0 0 0 0 -1.704l-13 -8a1 1 0 0 0 -1.524 .852z"/></svg>';
+        const SVG_STOP = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M17 4h-10a3 3 0 0 0 -3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3 -3v-10a3 3 0 0 0 -3 -3z"/></svg>';
+        const MONTH_NAMES = ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
+
+        const STATUS_MAP = {
+            running:         { text: '运行中',   txtCls: 'text-2xl font-bold text-emerald-500', dotCls: 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse mt-0.5', active: true },
+            sleeping:        { text: '休息中',   txtCls: 'text-2xl font-bold text-blue-400',    dotCls: 'w-2 h-2 rounded-full bg-blue-400 animate-pulse mt-0.5',    active: true },
+            quota_reached:   { text: '已达限额', txtCls: 'text-2xl font-bold text-amber-500',   dotCls: 'w-2 h-2 rounded-full bg-amber-500 mt-0.5',                 active: true },
+            out_of_schedule: { text: '未到时间', txtCls: 'text-2xl font-bold text-slate-400',   dotCls: 'w-2 h-2 rounded-full bg-slate-400 mt-0.5',                  active: true },
+            stopped:         { text: '已停用',   txtCls: 'text-2xl font-bold text-slate-400',   dotCls: 'w-2 h-2 rounded-full bg-slate-300 mt-0.5',                  active: false },
+        };
+
+        /* ========== 全局状态 ========== */
+        let liveChart, historyChart;
+        let currentMonth = new Date().getMonth() + 1;
+        let pollTimer = null;
+
+        /* ========== 工具函数 ========== */
+        function formatTraffic(bytes) {
+            if (bytes >= 1e12) return { val: (bytes / 1e12).toFixed(2), unit: 'TB' };
+            if (bytes >= 1e9)  return { val: (bytes / 1e9).toFixed(2),  unit: 'GB' };
+            if (bytes >= 1e6)  return { val: (bytes / 1e6).toFixed(2),  unit: 'MB' };
+            return { val: '0.00', unit: 'GB' };
+        }
+
+        function padTime(n) { return String(n).padStart(2, '0'); }
+
+        /* ========== 图表 ========== */
+        function initCharts() {
+            const isDark = document.documentElement.classList.contains('dark');
+            const colorPrimary = '#3b82f6';
+            const colorText = isDark ? '#94a3b8' : '#64748b';
+            const colorGrid = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)';
+
+            if (liveChart) liveChart.destroy();
+            liveChart = new Chart(document.getElementById('liveChart').getContext('2d'), {
+                type: 'line',
+                data: { labels: Array(30).fill(''), datasets: [{ data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0, fill: { target: 'origin', above: 'rgba(16,185,129,0.05)' } }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false, suggestedMax: 10 } }, animation: false }
+            });
+
+            if (historyChart) historyChart.destroy();
+            historyChart = new Chart(document.getElementById('historyChart').getContext('2d'), {
+                type: 'bar',
+                data: { labels: [], datasets: [{ data: [], backgroundColor: colorPrimary, borderRadius: 3, barPercentage: 0.5 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y.toFixed(1) + ' GB' } } }, scales: { x: { grid: { display: false }, ticks: { color: colorText, font: { size: 9, family: 'monospace' } } }, y: { border: { display: false }, grid: { color: colorGrid }, ticks: { color: colorText, font: { size: 9 }, callback: v => v + ' GB' } } } }
+            });
+        }
+
+        /* ========== API: 实时轮询 ========== */
+        async function pollStatus() {
+            try {
+                const res = await fetch('/api/status');
+                if (!res.ok) return;
+                const d = await res.json();
+
+                // 状态文字 / 指示灯 / 按钮
+                const s = STATUS_MAP[d.status] || STATUS_MAP.stopped;
+                document.getElementById('status-text').innerText = s.text;
+                document.getElementById('status-text').className = s.txtCls;
+                document.getElementById('status-indicator').className = s.dotCls;
+                const btn = document.getElementById('power-btn');
+                if (s.active) {
+                    btn.innerHTML = SVG_STOP;
+                    btn.className = 'absolute bottom-6 right-6 w-14 h-14 bg-red-500 text-white rounded-2xl flex items-center justify-center transition-all active:scale-95 shadow-lg shadow-red-500/30 z-20';
+                } else {
+                    btn.innerHTML = SVG_PLAY;
+                    btn.className = 'absolute bottom-6 right-6 w-14 h-14 bg-primary hover:bg-blue-600 text-white rounded-2xl flex items-center justify-center transition-all active:scale-95 shadow-lg shadow-blue-500/20 z-20';
+                }
+
+                // 实时速度
+                document.getElementById('speed-val').innerText = d.speed_mbps.toFixed(1);
+
+                // 今日流量
+                document.getElementById('today-total').innerText = (d.today_bytes / 1e9).toFixed(2);
+
+                // 运行时长
+                const sec = d.uptime_seconds || 0;
+                document.getElementById('uptime-display').innerText = padTime(Math.floor(sec/3600)) + ':' + padTime(Math.floor((sec%3600)/60)) + ':' + padTime(sec%60);
+
+                // 折线图
+                if (d.speed_history) {
+                    liveChart.data.datasets[0].data = d.speed_history;
+                    liveChart.data.labels = Array(d.speed_history.length).fill('');
+                    liveChart.update('none');
+                }
+            } catch(e) { /* 后端未启动，静默 */ }
+        }
+
+        /* ========== API: 启停 ========== */
+        async function toggleService() {
+            try { await fetch('/api/toggle', { method: 'POST' }); } catch(e) {}
+        }
+
+        /* ========== API: 历史流量 ========== */
+        async function loadHistory(month) {
+            document.getElementById('month-display').innerText = MONTH_NAMES[month - 1];
+            try {
+                const res = await fetch('/api/history?month=' + month);
+                if (!res.ok) return;
+                const d = await res.json();
+
+                // 总计
+                const t = formatTraffic(d.month_total_bytes);
+                document.getElementById('month-total').innerText = t.val;
+                document.getElementById('month-unit').innerText = t.unit;
+
+                // 柱状图
+                historyChart.data.labels = d.days.map(x => x.day.toString());
+                historyChart.data.datasets[0].data = d.days.map(x => +(x.bytes / 1e9).toFixed(1));
+                historyChart.update();
+            } catch(e) {}
+        }
+
+        function changeMonth(delta) {
+            const maxMonth = new Date().getMonth() + 1;
+            const next = currentMonth + delta;
+            if (next < 1 || next > maxMonth) return;
+            currentMonth = next;
+            loadHistory(currentMonth);
+        }
+
+        /* ========== API: 日志 ========== */
+        async function loadLogs() {
+            try {
+                const res = await fetch('/api/logs');
+                if (!res.ok) return;
+                const d = await res.json();
+                const box = document.getElementById('console-logs');
+                const isDark = document.documentElement.classList.contains('dark');
+                const textCls = isDark ? 'text-slate-300' : 'text-slate-600';
+                box.innerHTML = '';
+                (d.entries || []).forEach(e => {
+                    const div = document.createElement('div');
+                    div.innerHTML = '<span class="opacity-30 mr-2">[' + e.time + ']</span><span class="' + textCls + '">' + e.msg + '</span>';
+                    box.appendChild(div);
+                });
+                box.scrollTop = box.scrollHeight;
+            } catch(e) {}
+        }
+
+        /* ========== API: 配置 ========== */
+        async function loadConfig() {
+            try {
+                const res = await fetch('/api/config');
+                if (!res.ok) return;
+                const c = await res.json();
+                document.getElementById('conf-speed').innerText = c.speed_limit_mbps;
+                document.getElementById('conf-speed-slider').value = c.speed_limit_mbps;
+                document.getElementById('conf-quota').value = c.daily_quota_gb;
+                document.getElementById('conf-start').value = c.schedule_start;
+                document.getElementById('conf-end').value = c.schedule_end;
+                document.getElementById('conf-urls').value = (c.urls || []).join('\n');
+            } catch(e) {}
+        }
+
+        async function saveConfig() {
+            const cfg = {
+                speed_limit_mbps: parseInt(document.getElementById('conf-speed').innerText) || 5,
+                daily_quota_gb:   parseInt(document.getElementById('conf-quota').value) || 200,
+                schedule_start:   document.getElementById('conf-start').value || '00:00',
+                schedule_end:     document.getElementById('conf-end').value || '23:59',
+                urls: document.getElementById('conf-urls').value.split('\n').map(s => s.trim()).filter(Boolean)
+            };
+            try {
+                await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+                toggleModal('config-modal');
+            } catch(e) {}
+        }
+
+        /* ========== 弹窗 ========== */
+        function toggleModal(id) {
+            const modal = document.getElementById(id);
+            const content = modal.querySelector('.modal-content');
+            if (modal.classList.contains('hidden')) {
+                if (id === 'log-modal') loadLogs();
+                if (id === 'config-modal') loadConfig();
+                modal.classList.remove('hidden');
+                setTimeout(() => { content.classList.remove('scale-95','opacity-0'); content.classList.add('scale-100','opacity-100'); }, 10);
+            } else {
+                content.classList.remove('scale-100','opacity-100'); content.classList.add('scale-95','opacity-0');
+                setTimeout(() => modal.classList.add('hidden'), 200);
+            }
+        }
+
+        /* ========== 主题 ========== */
+        function toggleTheme() {
+            document.documentElement.classList.toggle('dark');
+            initCharts();
+            loadHistory(currentMonth);
+        }
+
+        /* ========== 启动 ========== */
+        window.onload = () => {
+            initCharts();
+            loadHistory(currentMonth);
+            pollStatus();
+            pollTimer = setInterval(pollStatus, 1000);
+        };
+    </script>
+</body>
+</html>
