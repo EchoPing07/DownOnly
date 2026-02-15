@@ -86,6 +86,7 @@
                         <div class="flex items-baseline gap-2 mt-1">
                             <span class="text-5xl font-bold tracking-tighter" id="today-total">0.00</span>
                             <span class="text-sm font-bold text-slate-400">GB</span>
+                            <span class="text-xs text-slate-300 dark:text-slate-600 ml-1">/ <span id="today-quota">200</span> GB</span>
                         </div>
                     </div>
                     <div class="text-right">
@@ -160,12 +161,19 @@
                         <span>1 Mbps</span><span>256 Mbps</span>
                     </div>
                 </div>
-                <!-- 限额 -->
+                <!-- 每日限额（随机区间） -->
                 <div>
-                    <label class="block text-[11px] font-bold text-slate-400 uppercase mb-2 px-1">每天流量限额</label>
-                    <div class="relative">
-                        <input id="conf-quota" type="number" value="200" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold focus:ring-1 focus:ring-primary focus:border-primary outline-none">
-                        <span class="absolute right-4 top-3.5 text-xs font-bold text-slate-300">GB</span>
+                    <label class="block text-[11px] font-bold text-slate-400 uppercase mb-2 px-1">每日流量区间</label>
+                    <div class="flex items-center gap-3">
+                        <div class="flex-1 relative">
+                            <input id="conf-quota-min" type="number" value="150" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                            <span class="absolute right-3 top-3.5 text-[10px] font-bold text-slate-300">GB</span>
+                        </div>
+                        <span class="text-slate-300 text-sm font-bold">至</span>
+                        <div class="flex-1 relative">
+                            <input id="conf-quota-max" type="number" value="200" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                            <span class="absolute right-3 top-3.5 text-[10px] font-bold text-slate-300">GB</span>
+                        </div>
                     </div>
                 </div>
                 <!-- 运行时间 -->
@@ -270,6 +278,7 @@
                 }
                 document.getElementById('speed-val').innerText = d.speed_mbps.toFixed(1);
                 document.getElementById('today-total').innerText = (d.today_bytes / 1e9).toFixed(2);
+                document.getElementById('today-quota').innerText = d.today_quota_gb || 200;
                 const sec = d.uptime_seconds || 0;
                 document.getElementById('uptime-display').innerText = padTime(Math.floor(sec/3600)) + ':' + padTime(Math.floor((sec%3600)/60)) + ':' + padTime(sec%60);
                 if (d.speed_history) {
@@ -332,7 +341,8 @@
                 const c = await res.json();
                 document.getElementById('conf-speed').innerText = c.speed_limit_mbps;
                 document.getElementById('conf-speed-slider').value = c.speed_limit_mbps;
-                document.getElementById('conf-quota').value = c.daily_quota_gb;
+                document.getElementById('conf-quota-min').value = c.daily_quota_min_gb;
+                document.getElementById('conf-quota-max').value = c.daily_quota_max_gb;
                 document.getElementById('conf-start').value = c.schedule_start;
                 document.getElementById('conf-end').value = c.schedule_end;
                 document.getElementById('conf-sleep-min').value = c.sleep_min_minutes;
@@ -343,12 +353,13 @@
 
         async function saveConfig() {
             const cfg = {
-                speed_limit_mbps:  parseInt(document.getElementById('conf-speed').innerText) || 5,
-                daily_quota_gb:    parseInt(document.getElementById('conf-quota').value) || 200,
-                schedule_start:    document.getElementById('conf-start').value || '00:00',
-                schedule_end:      document.getElementById('conf-end').value || '23:59',
-                sleep_min_minutes: parseInt(document.getElementById('conf-sleep-min').value) || 10,
-                sleep_max_minutes: parseInt(document.getElementById('conf-sleep-max').value) || 20,
+                speed_limit_mbps:   parseInt(document.getElementById('conf-speed').innerText) || 5,
+                daily_quota_min_gb: parseInt(document.getElementById('conf-quota-min').value) || 150,
+                daily_quota_max_gb: parseInt(document.getElementById('conf-quota-max').value) || 200,
+                schedule_start:     document.getElementById('conf-start').value || '00:00',
+                schedule_end:       document.getElementById('conf-end').value || '23:59',
+                sleep_min_minutes:  parseInt(document.getElementById('conf-sleep-min').value) || 10,
+                sleep_max_minutes:  parseInt(document.getElementById('conf-sleep-max').value) || 20,
                 urls: document.getElementById('conf-urls').value.split('\n').map(s => s.trim()).filter(Boolean)
             };
             try {

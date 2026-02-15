@@ -26,7 +26,8 @@ const dataDir = "data"
 
 type Config struct {
 	SpeedLimitMbps  int      `json:"speed_limit_mbps"`
-	DailyQuotaGB    int      `json:"daily_quota_gb"`
+	DailyQuotaMinGB int      `json:"daily_quota_min_gb"`
+	DailyQuotaMaxGB int      `json:"daily_quota_max_gb"`
 	ScheduleStart   string   `json:"schedule_start"`
 	ScheduleEnd     string   `json:"schedule_end"`
 	SleepMinMinutes int      `json:"sleep_min_minutes"`
@@ -35,9 +36,10 @@ type Config struct {
 }
 
 type Stats struct {
-	Daily      map[string]uint64 `json:"daily"`
-	TodayBytes uint64            `json:"today_bytes"`
-	TodayDate  string            `json:"today_date"`
+	Daily        map[string]uint64 `json:"daily"`
+	TodayBytes   uint64            `json:"today_bytes"`
+	TodayDate    string            `json:"today_date"`
+	TodayQuotaGB int               `json:"today_quota_gb"`
 }
 
 type LogEntry struct {
@@ -72,7 +74,8 @@ func (app *App) loadConfig() {
 	if err != nil {
 		app.config = Config{
 			SpeedLimitMbps:  5,
-			DailyQuotaGB:    200,
+			DailyQuotaMinGB: 150,
+			DailyQuotaMaxGB: 200,
 			ScheduleStart:   "00:00",
 			ScheduleEnd:     "23:59",
 			SleepMinMinutes: 10,
@@ -85,6 +88,19 @@ func (app *App) loadConfig() {
 		return
 	}
 	json.Unmarshal(data, &app.config)
+	app.fixConfig()
+}
+
+func (app *App) fixConfig() {
+	if app.config.DailyQuotaMinGB <= 0 {
+		app.config.DailyQuotaMinGB = 150
+	}
+	if app.config.DailyQuotaMaxGB <= 0 {
+		app.config.DailyQuotaMaxGB = 200
+	}
+	if app.config.DailyQuotaMaxGB < app.config.DailyQuotaMinGB {
+		app.config.DailyQuotaMaxGB = app.config.DailyQuotaMinGB
+	}
 	if app.config.SleepMinMinutes <= 0 {
 		app.config.SleepMinMinutes = 10
 	}
@@ -148,6 +164,19 @@ func (app *App) addLog(msg string) {
 	}
 }
 
+// ==================== 随机额度 ====================
+
+func (app *App) rollTodayQuota() {
+	min := app.config.DailyQuotaMinGB
+	max := app.config.DailyQuotaMaxGB
+	if max <= min {
+		app.stats.TodayQuotaGB = min
+	} else {
+		app.stats.TodayQuotaGB = rand.Intn(max-min+1) + min
+	}
+	app.addLog(fmt.Sprintf("今日流量限额已生成: %d GB", app.stats.TodayQuotaGB))
+}
+
 // ==================== 日期与调度 ====================
 
 func (app *App) checkDateChange() {
@@ -155,12 +184,16 @@ func (app *App) checkDateChange() {
 	if app.stats.TodayDate == today {
 		return
 	}
+	// 归档昨天
 	if app.stats.TodayDate != "" && app.stats.TodayBytes > 0 {
 		app.stats.Daily[app.stats.TodayDate] = app.stats.TodayBytes
 	}
 	app.stats.TodayBytes = 0
 	app.stats.TodayDate = today
 	app.addLog("日期更新，流量计数器已重置")
+	// 新的一天，重新随机额度
+	app.rollTodayQuota()
+	// 年度清理
 	thisYear := time.Now().Format("2006")
 	for k := range app.stats.Daily {
 		if !strings.HasPrefix(k, thisYear) {
@@ -190,7 +223,10 @@ func (app *App) isInSchedule() bool {
 }
 
 func (app *App) isQuotaReached() bool {
-	return app.stats.TodayBytes >= uint64(app.config.DailyQuotaGB)*1e9
+	if app.stats.TodayQuotaGB <= 0 {
+		return false
+	}
+	return app.stats.TodayBytes >= uint64(app.stats.TodayQuotaGB)*1e9
 }
 
 func (app *App) sleepWithCheck(seconds int) {
@@ -275,7 +311,6 @@ func (app *App) downloadWorker() {
 			continue
 		}
 
-		// 根据配置的休息区间随机休息
 		if sleepMax < sleepMin {
 			sleepMax = sleepMin
 		}
@@ -403,8 +438,8 @@ func (app *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"speed_history":  app.speedHistory,
 		"today_bytes":    app.stats.TodayBytes,
 		"today_date":     app.stats.TodayDate,
+		"today_quota_gb": app.stats.TodayQuotaGB,
 		"uptime_seconds": uptime,
-		"daily_quota_gb": app.config.DailyQuotaGB,
 	})
 }
 
@@ -473,21 +508,18 @@ func (app *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "", 400)
 			return
 		}
-		if cfg.SleepMinMinutes <= 0 {
-			cfg.SleepMinMinutes = 10
-		}
-		if cfg.SleepMaxMinutes <= 0 {
-			cfg.SleepMaxMinutes = 20
-		}
-		if cfg.SleepMaxMinutes < cfg.SleepMinMinutes {
-			cfg.SleepMaxMinutes = cfg.SleepMinMinutes
-		}
 		app.mu.Lock()
 		app.config = cfg
+		app.fixConfig()
 		app.saveConfig()
-		app.addLog(fmt.Sprintf("配置已更新: %d Mbps, %d GB/天, %s-%s, 休息 %d~%d 分钟",
-			cfg.SpeedLimitMbps, cfg.DailyQuotaGB, cfg.ScheduleStart, cfg.ScheduleEnd,
-			cfg.SleepMinMinutes, cfg.SleepMaxMinutes))
+		app.addLog(fmt.Sprintf("配置已更新: %d Mbps, %d~%d GB/天, %s-%s, 休息 %d~%d 分钟",
+			cfg.SpeedLimitMbps, app.config.DailyQuotaMinGB, app.config.DailyQuotaMaxGB,
+			cfg.ScheduleStart, cfg.ScheduleEnd,
+			app.config.SleepMinMinutes, app.config.SleepMaxMinutes))
+		// 如果当前额度不在新范围内，重新生成
+		if app.stats.TodayQuotaGB < app.config.DailyQuotaMinGB || app.stats.TodayQuotaGB > app.config.DailyQuotaMaxGB {
+			app.rollTodayQuota()
+		}
 		app.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": true})
@@ -534,6 +566,12 @@ func main() {
 	app.loadConfig()
 	app.loadStats()
 	app.loadLogs()
+
+	// 首次启动或新的一天：生成今日额度
+	if app.stats.TodayQuotaGB <= 0 {
+		app.rollTodayQuota()
+	}
+
 	app.addLog("DownOnly 初始化完成")
 	app.saveLogs()
 
