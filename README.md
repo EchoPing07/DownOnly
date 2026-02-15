@@ -164,7 +164,10 @@ https://github.com/EchoPing07/DownOnly/pkgs/container/downonly
 **Docker Hub** 地址：
 https://hub.docker.com/r/echoping/downonly
 
-以下模板使用 **GHCR** 仓库地址演示
+以下模板使用 **GHCR** 仓库地址演示，且运行镜像请务必携带以下参数，以确保容器与宿主机时区保持一致
+```bash
+-v /etc/localtime:/etc/localtime:ro \
+```
 
 #### Docker Run 运行：
 
@@ -173,6 +176,7 @@ docker run -d \
   --name downonly \
   -p 8080:8080 \
   -v /opt/downonly/data:/app/data \
+  -v /etc/localtime:/etc/localtime:ro \
   --restart always \
   ghcr.io/echoping07/downonly:latest
 ```
@@ -189,6 +193,7 @@ services:
       - "8080:8080"
     volumes:
       - ./data:/app/data
+      - /etc/localtime:/etc/localtime:ro  # 同步宿主机时区
     restart: always
 ```
 运行命令：
