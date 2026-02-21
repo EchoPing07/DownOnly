@@ -20,11 +20,12 @@
         .no-scrollbar::-webkit-scrollbar { display: none; }
         input[type="time"]::-webkit-calendar-picker-indicator { display: none; }
         input[type="time"] { -webkit-appearance: none; }
+        .log-line { transition: all 0.15s ease; }
+        .log-line.expanded { white-space: normal; word-break: break-all; }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-800 dark:bg-dark dark:text-slate-200 min-h-screen flex flex-col relative antialiased">
 
-    <!-- 顶栏 -->
     <nav class="sticky top-0 z-40 bg-white/80 dark:bg-cardDark/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800">
         <div class="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
             <div class="flex items-center gap-3">
@@ -56,7 +57,6 @@
         </div>
     </nav>
 
-    <!-- 主内容 -->
     <main class="flex-1 max-w-5xl mx-auto px-4 py-8 w-full space-y-6">
         <section class="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div class="bg-white dark:bg-cardDark p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm relative overflow-hidden h-48 flex flex-col justify-between">
@@ -127,11 +127,16 @@
         <div class="relative w-full max-w-2xl h-[70vh] bg-white dark:bg-slate-950 rounded-3xl border border-slate-200 dark:border-white/10 shadow-2xl overflow-hidden flex flex-col transform transition-all scale-95 opacity-0 modal-content">
             <div class="flex justify-between items-center p-5 border-b border-slate-100 dark:border-white/5 bg-slate-50 dark:bg-slate-900/50">
                 <span class="text-sm font-bold tracking-wide dark:text-white">日志</span>
-                <button onclick="toggleModal('log-modal')" class="text-slate-400 hover:text-slate-600 dark:hover:text-white">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M18 6l-12 12"/><path d="M6 6l12 12"/></svg>
-                </button>
+                <div class="flex items-center gap-3">
+                    <select id="log-date-select" onchange="loadLogs(this.value)" class="bg-slate-100 dark:bg-slate-800 border-0 rounded-lg px-3 py-1.5 text-xs font-bold text-slate-600 dark:text-slate-300 focus:outline-none focus:ring-1 focus:ring-primary cursor-pointer appearance-none">
+                        <option>--</option>
+                    </select>
+                    <button onclick="toggleModal('log-modal')" class="text-slate-400 hover:text-slate-600 dark:hover:text-white">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M18 6l-12 12"/><path d="M6 6l12 12"/></svg>
+                    </button>
+                </div>
             </div>
-            <div class="flex-1 p-6 overflow-y-auto font-mono text-xs space-y-2 no-scrollbar" id="console-logs">
+            <div class="flex-1 p-6 overflow-y-auto font-mono text-xs space-y-1 no-scrollbar" id="console-logs">
                 <div class="text-slate-300 dark:text-slate-600 text-center py-8">等待连接后端...</div>
             </div>
         </div>
@@ -185,12 +190,12 @@
                     <div class="flex items-center gap-3">
                         <div class="flex-1 relative">
                             <input id="conf-sleep-min" type="number" value="10" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
-                            <span class="absolute right-3 top-3.5 text-[10px] font-bold text-slate-300">min</span>
+                            <span class="absolute right-3 top-3.5 text-[10px] font-bold text-slate-300">分钟</span>
                         </div>
                         <span class="text-slate-300 text-sm font-bold">至</span>
                         <div class="flex-1 relative">
                             <input id="conf-sleep-max" type="number" value="20" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
-                            <span class="absolute right-3 top-3.5 text-[10px] font-bold text-slate-300">min</span>
+                            <span class="absolute right-3 top-3.5 text-[10px] font-bold text-slate-300">分钟</span>
                         </div>
                     </div>
                 </div>
@@ -219,9 +224,7 @@
             stopped:         { text: '已停用',   txtCls: 'text-2xl font-bold text-slate-400',   dotCls: 'w-2 h-2 rounded-full bg-slate-300 mt-0.5',                  active: false },
         };
 
-        let liveChart, historyChart;
-        let currentMonth = new Date().getMonth() + 1;
-        let logRefreshTimer = null;
+        let liveChart, historyChart, currentMonth = new Date().getMonth() + 1, logRefreshTimer = null;
 
         function formatTraffic(bytes) {
             if (bytes >= 1e12) return { val: (bytes / 1e12).toFixed(2), unit: 'TB' };
@@ -230,67 +233,49 @@
             return { val: '0.00', unit: 'GB' };
         }
         function padTime(n) { return String(n).padStart(2, '0'); }
+        function todayStr() { return new Date().toISOString().slice(0, 10); }
 
         function initCharts() {
             const isDark = document.documentElement.classList.contains('dark');
-            const colorPrimary = '#3b82f6';
-            const colorText = isDark ? '#94a3b8' : '#64748b';
-            const colorGrid = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)';
-
+            const cP = '#3b82f6', cT = isDark ? '#94a3b8' : '#64748b', cG = isDark ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.03)';
             if (liveChart) liveChart.destroy();
             liveChart = new Chart(document.getElementById('liveChart').getContext('2d'), {
-                type: 'line',
-                data: { labels: Array(30).fill(''), datasets: [{ data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0, fill: { target: 'origin', above: 'rgba(16,185,129,0.05)' } }] },
+                type: 'line', data: { labels: Array(30).fill(''), datasets: [{ data: Array(30).fill(0), borderColor: '#10b981', borderWidth: 2, tension: 0.4, pointRadius: 0, fill: { target: 'origin', above: 'rgba(16,185,129,0.05)' } }] },
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { display: false, suggestedMax: 10 } }, animation: false }
             });
-
             if (historyChart) historyChart.destroy();
             historyChart = new Chart(document.getElementById('historyChart').getContext('2d'), {
-                type: 'bar',
-                data: { labels: [], datasets: [{ data: [], backgroundColor: colorPrimary, borderRadius: 3, barPercentage: 0.5 }] },
-                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y.toFixed(1) + ' GB' } } }, scales: { x: { grid: { display: false }, ticks: { color: colorText, font: { size: 9, family: 'monospace' } } }, y: { border: { display: false }, grid: { color: colorGrid }, ticks: { color: colorText, font: { size: 9 }, callback: v => v + ' GB' } } } }
+                type: 'bar', data: { labels: [], datasets: [{ data: [], backgroundColor: cP, borderRadius: 3, barPercentage: 0.5 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y.toFixed(1) + ' GB' } } }, scales: { x: { grid: { display: false }, ticks: { color: cT, font: { size: 9, family: 'monospace' } } }, y: { border: { display: false }, grid: { color: cG }, ticks: { color: cT, font: { size: 9 }, callback: v => v + ' GB' } } } }
             });
         }
 
         async function pollStatus() {
             try {
-                const res = await fetch('/api/status');
-                if (!res.ok) return;
+                const res = await fetch('/api/status'); if (!res.ok) return;
                 const d = await res.json();
                 const s = STATUS_MAP[d.status] || STATUS_MAP.stopped;
                 document.getElementById('status-text').innerText = s.text;
                 document.getElementById('status-text').className = s.txtCls;
                 document.getElementById('status-indicator').className = s.dotCls;
                 const btn = document.getElementById('power-btn');
-                if (s.active) {
-                    btn.innerHTML = SVG_STOP;
-                    btn.className = 'absolute bottom-6 right-6 w-14 h-14 bg-red-500 text-white rounded-2xl flex items-center justify-center transition-all active:scale-95 shadow-lg shadow-red-500/30 z-20';
-                } else {
-                    btn.innerHTML = SVG_PLAY;
-                    btn.className = 'absolute bottom-6 right-6 w-14 h-14 bg-primary hover:bg-blue-600 text-white rounded-2xl flex items-center justify-center transition-all active:scale-95 shadow-lg shadow-blue-500/20 z-20';
-                }
+                if (s.active) { btn.innerHTML = SVG_STOP; btn.className = 'absolute bottom-6 right-6 w-14 h-14 bg-red-500 text-white rounded-2xl flex items-center justify-center transition-all active:scale-95 shadow-lg shadow-red-500/30 z-20'; }
+                else { btn.innerHTML = SVG_PLAY; btn.className = 'absolute bottom-6 right-6 w-14 h-14 bg-primary hover:bg-blue-600 text-white rounded-2xl flex items-center justify-center transition-all active:scale-95 shadow-lg shadow-blue-500/20 z-20'; }
                 document.getElementById('speed-val').innerText = d.speed_mbps.toFixed(1);
                 document.getElementById('today-total').innerText = (d.today_bytes / 1e9).toFixed(2);
                 document.getElementById('today-quota').innerText = d.today_quota_gb || 200;
                 const sec = d.uptime_seconds || 0;
                 document.getElementById('uptime-display').innerText = padTime(Math.floor(sec/3600)) + ':' + padTime(Math.floor((sec%3600)/60)) + ':' + padTime(sec%60);
-                if (d.speed_history) {
-                    liveChart.data.datasets[0].data = d.speed_history;
-                    liveChart.data.labels = Array(d.speed_history.length).fill('');
-                    liveChart.update('none');
-                }
+                if (d.speed_history) { liveChart.data.datasets[0].data = d.speed_history; liveChart.data.labels = Array(d.speed_history.length).fill(''); liveChart.update('none'); }
             } catch(e) {}
         }
 
-        async function toggleService() {
-            try { await fetch('/api/toggle', { method: 'POST' }); } catch(e) {}
-        }
+        async function toggleService() { try { await fetch('/api/toggle', { method: 'POST' }); } catch(e) {} }
 
         async function loadHistory(month) {
             document.getElementById('month-display').innerText = MONTH_NAMES[month - 1];
             try {
-                const res = await fetch('/api/history?month=' + month);
-                if (!res.ok) return;
+                const res = await fetch('/api/history?month=' + month); if (!res.ok) return;
                 const d = await res.json();
                 const t = formatTraffic(d.month_total_bytes);
                 document.getElementById('month-total').innerText = t.val;
@@ -302,35 +287,78 @@
         }
 
         function changeMonth(delta) {
-            const maxMonth = new Date().getMonth() + 1;
             const next = currentMonth + delta;
-            if (next < 1 || next > maxMonth) return;
-            currentMonth = next;
-            loadHistory(currentMonth);
+            if (next < 1 || next > new Date().getMonth() + 1) return;
+            currentMonth = next; loadHistory(currentMonth);
         }
 
-        async function loadLogs() {
+        async function loadLogDates() {
             try {
-                const res = await fetch('/api/logs');
-                if (!res.ok) return;
+                const res = await fetch('/api/log_dates'); if (!res.ok) return;
+                const dates = await res.json();
+                const sel = document.getElementById('log-date-select');
+                sel.innerHTML = '';
+                (dates || []).forEach(d => {
+                    const opt = document.createElement('option');
+                    opt.value = d;
+                    opt.textContent = d.slice(5);
+                    sel.appendChild(opt);
+                });
+            } catch(e) {}
+        }
+
+        async function loadLogs(date) {
+            if (!date) date = todayStr();
+            try {
+                const res = await fetch('/api/logs?date=' + date); if (!res.ok) return;
                 const d = await res.json();
                 const box = document.getElementById('console-logs');
-                const isDark = document.documentElement.classList.contains('dark');
-                const textCls = isDark ? 'text-slate-300' : 'text-slate-600';
+
+                // 刷新前记住滚动状态
+                var wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 50;
+                var oldScrollTop = box.scrollTop;
+
+                // 刷新前记住哪些行是展开的
+                var expandedSet = new Set();
+                box.querySelectorAll('.log-line.expanded').forEach(function(el) {
+                    expandedSet.add(el.dataset.idx);
+                });
+
                 box.innerHTML = '';
-                (d.entries || []).forEach(e => {
-                    const div = document.createElement('div');
-                    div.innerHTML = '<span class="opacity-30 mr-2">[' + e.time + ']</span><span class="' + textCls + '">' + e.msg + '</span>';
+                if (!d.entries || d.entries.length === 0) {
+                    box.innerHTML = '<div class="text-slate-300 dark:text-slate-600 text-center py-8">暂无日志记录</div>';
+                    return;
+                }
+                d.entries.forEach(function(e, i) {
+                    var isExpanded = expandedSet.has(String(i));
+                    var div = document.createElement('div');
+                    div.className = 'log-line py-0.5 hover:bg-slate-50 dark:hover:bg-slate-900/50 rounded px-1 -mx-1 transition-colors cursor-pointer select-none active:opacity-70' + (isExpanded ? ' expanded' : ' truncate');
+                    div.dataset.idx = i;
+                    div.title = '[' + e.time + '] ' + e.msg;
+                    div.onclick = function() { this.classList.toggle('truncate'); this.classList.toggle('expanded'); };
+                    var timeSpan = document.createElement('span');
+                    timeSpan.className = 'text-slate-400 dark:text-slate-600 mr-2';
+                    timeSpan.textContent = '[' + e.time + ']';
+                    var msgSpan = document.createElement('span');
+                    msgSpan.className = 'text-slate-600 dark:text-slate-300';
+                    msgSpan.textContent = e.msg;
+                    div.appendChild(timeSpan);
+                    div.appendChild(msgSpan);
                     box.appendChild(div);
                 });
-                box.scrollTop = box.scrollHeight;
+
+                // 在底部 → 跟随新日志；在上面翻看 → 保持原位
+                if (wasAtBottom) {
+                    box.scrollTop = box.scrollHeight;
+                } else {
+                    box.scrollTop = oldScrollTop;
+                }
             } catch(e) {}
         }
 
         async function loadConfig() {
             try {
-                const res = await fetch('/api/config');
-                if (!res.ok) return;
+                const res = await fetch('/api/config'); if (!res.ok) return;
                 const c = await res.json();
                 document.getElementById('conf-speed').innerText = c.speed_limit_mbps;
                 document.getElementById('conf-speed-slider').value = c.speed_limit_mbps;
@@ -346,19 +374,16 @@
 
         async function saveConfig() {
             const cfg = {
-                speed_limit_mbps:   parseInt(document.getElementById('conf-speed').innerText) || 5,
+                speed_limit_mbps: parseInt(document.getElementById('conf-speed').innerText) || 5,
                 daily_quota_min_gb: parseInt(document.getElementById('conf-quota-min').value) || 150,
                 daily_quota_max_gb: parseInt(document.getElementById('conf-quota-max').value) || 200,
-                schedule_start:     document.getElementById('conf-start').value || '00:00',
-                schedule_end:       document.getElementById('conf-end').value || '23:59',
-                sleep_min_minutes:  parseInt(document.getElementById('conf-sleep-min').value) || 10,
-                sleep_max_minutes:  parseInt(document.getElementById('conf-sleep-max').value) || 20,
+                schedule_start: document.getElementById('conf-start').value || '00:00',
+                schedule_end: document.getElementById('conf-end').value || '23:59',
+                sleep_min_minutes: parseInt(document.getElementById('conf-sleep-min').value) || 10,
+                sleep_max_minutes: parseInt(document.getElementById('conf-sleep-max').value) || 20,
                 urls: document.getElementById('conf-urls').value.split('\n').map(s => s.trim()).filter(Boolean)
             };
-            try {
-                await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
-                toggleModal('config-modal');
-            } catch(e) {}
+            try { await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) }); toggleModal('config-modal'); } catch(e) {}
         }
 
         function toggleModal(id) {
@@ -366,36 +391,30 @@
             const content = modal.querySelector('.modal-content');
             if (modal.classList.contains('hidden')) {
                 if (id === 'log-modal') {
+                    loadLogDates();
                     loadLogs();
-                    logRefreshTimer = setInterval(loadLogs, 3000);
+                    logRefreshTimer = setInterval(() => {
+                        const sel = document.getElementById('log-date-select');
+                        if (sel.value === todayStr()) loadLogs(todayStr());
+                    }, 3000);
                 }
                 if (id === 'config-modal') loadConfig();
                 modal.classList.remove('hidden');
                 setTimeout(() => { content.classList.remove('scale-95','opacity-0'); content.classList.add('scale-100','opacity-100'); }, 10);
             } else {
                 content.classList.remove('scale-100','opacity-100'); content.classList.add('scale-95','opacity-0');
-                if (id === 'log-modal' && logRefreshTimer) {
-                    clearInterval(logRefreshTimer);
-                    logRefreshTimer = null;
-                }
+                if (id === 'log-modal' && logRefreshTimer) { clearInterval(logRefreshTimer); logRefreshTimer = null; }
                 setTimeout(() => modal.classList.add('hidden'), 200);
             }
         }
 
         function toggleTheme() {
             document.documentElement.classList.toggle('dark');
-            const isDark = document.documentElement.classList.contains('dark');
-            localStorage.setItem('downonly-theme', isDark ? 'dark' : 'light');
-            initCharts();
-            loadHistory(currentMonth);
+            localStorage.setItem('downonly-theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');
+            initCharts(); loadHistory(currentMonth);
         }
 
-        window.onload = () => {
-            initCharts();
-            loadHistory(currentMonth);
-            pollStatus();
-            setInterval(pollStatus, 1000);
-        };
+        window.onload = () => { initCharts(); loadHistory(currentMonth); pollStatus(); setInterval(pollStatus, 1000); };
     </script>
 </body>
 </html>
