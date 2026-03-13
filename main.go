@@ -45,6 +45,7 @@ type Stats struct {
 	TodayBytes   uint64            `json:"today_bytes"`
 	TodayDate    string            `json:"today_date"`
 	TodayQuotaGB int               `json:"today_quota_gb"`
+	Enabled      bool              `json:"enabled"`
 }
 
 type LogEntry struct {
@@ -58,7 +59,6 @@ type App struct {
 	config Config
 	stats  Stats
 
-	// 日志：按天存储，内存中只保留今天的
 	todayLogs     []LogEntry
 	todayLogsDate string
 
@@ -73,8 +73,6 @@ type App struct {
 	bytesAccumulator  atomic.Uint64
 	currentSpeedLimit atomic.Int64
 }
-
-// ==================== 运行调优 ====================
 
 func setLowPriority() {
 	syscall.Setpriority(syscall.PRIO_PROCESS, 0, 19)
@@ -139,23 +137,15 @@ func (app *App) logFilePath(date string) string {
 
 func (app *App) loadLogsFromFile(date string) []LogEntry {
 	data, err := os.ReadFile(app.logFilePath(date))
-	if err != nil {
-		return nil
-	}
-	var result struct {
-		Entries []LogEntry `json:"entries"`
-	}
+	if err != nil { return nil }
+	var result struct { Entries []LogEntry `json:"entries"` }
 	json.Unmarshal(data, &result)
 	return result.Entries
 }
 
 func (app *App) saveTodayLogs() {
-	if len(app.todayLogs) == 0 {
-		return
-	}
-	data, _ := json.MarshalIndent(map[string]interface{}{
-		"entries": app.todayLogs,
-	}, "", "  ")
+	if len(app.todayLogs) == 0 { return }
+	data, _ := json.MarshalIndent(map[string]interface{}{"entries": app.todayLogs}, "", "  ")
 	os.WriteFile(app.logFilePath(app.todayLogsDate), data, 0644)
 }
 
@@ -164,7 +154,6 @@ func (app *App) addLog(msg string) {
 		Time: time.Now().Format("15:04:05"),
 		Msg:  msg,
 	})
-	// 单日上限 1000 条
 	if len(app.todayLogs) > 1000 {
 		app.todayLogs = app.todayLogs[len(app.todayLogs)-1000:]
 	}
@@ -173,7 +162,6 @@ func (app *App) addLog(msg string) {
 func (app *App) getLogDates() []string {
 	dateSet := make(map[string]bool)
 	dateSet[app.todayLogsDate] = true
-
 	files, err := os.ReadDir(logsDir)
 	if err == nil {
 		for _, f := range files {
@@ -184,11 +172,8 @@ func (app *App) getLogDates() []string {
 			}
 		}
 	}
-
 	dates := make([]string, 0, len(dateSet))
-	for d := range dateSet {
-		dates = append(dates, d)
-	}
+	for d := range dateSet { dates = append(dates, d) }
 	sort.Sort(sort.Reverse(sort.StringSlice(dates)))
 	return dates
 }
@@ -196,9 +181,7 @@ func (app *App) getLogDates() []string {
 func (app *App) cleanOldLogs() {
 	cutoff := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
 	files, err := os.ReadDir(logsDir)
-	if err != nil {
-		return
-	}
+	if err != nil { return }
 	for _, f := range files {
 		name := f.Name()
 		if strings.HasPrefix(name, "log-") && strings.HasSuffix(name, ".json") {
@@ -216,9 +199,7 @@ func (app *App) cleanOldLogs() {
 func (app *App) rollTodayQuota() {
 	min := app.config.DailyQuotaMinGB
 	max := app.config.DailyQuotaMaxGB
-	if max <= min {
-		app.stats.TodayQuotaGB = min
-	} else {
+	if max <= min { app.stats.TodayQuotaGB = min } else {
 		app.stats.TodayQuotaGB = rand.Intn(max-min+1) + min
 	}
 	app.addLog(fmt.Sprintf("今日流量限额已生成: %d GB", app.stats.TodayQuotaGB))
@@ -228,30 +209,21 @@ func (app *App) rollTodayQuota() {
 
 func (app *App) checkDateChange() {
 	today := time.Now().Format("2006-01-02")
-	if app.stats.TodayDate == today {
-		return
-	}
-	// 保存昨天的日志到文件
+	if app.stats.TodayDate == today { return }
 	app.saveTodayLogs()
-	// 归档昨天的流量
 	if app.stats.TodayDate != "" && app.stats.TodayBytes > 0 {
 		app.stats.Daily[app.stats.TodayDate] = app.stats.TodayBytes
 	}
-	// 重置
 	app.stats.TodayBytes = 0
 	app.stats.TodayDate = today
 	app.todayLogs = []LogEntry{}
 	app.todayLogsDate = today
 	app.addLog("日期更新，流量计数器已重置")
 	app.rollTodayQuota()
-	// 清理旧日志
 	app.cleanOldLogs()
-	// 年度清理流量数据
 	thisYear := time.Now().Format("2006")
 	for k := range app.stats.Daily {
-		if !strings.HasPrefix(k, thisYear) {
-			delete(app.stats.Daily, k)
-		}
+		if !strings.HasPrefix(k, thisYear) { delete(app.stats.Daily, k) }
 	}
 }
 
@@ -312,6 +284,7 @@ func (app *App) downloadWorker() {
 		if len(urls) == 0 {
 			app.mu.Lock(); app.addLog("没有配置下载地址，服务已停止")
 			app.isRunning.Store(false); app.status = "stopped"; app.shouldStop.Store(true)
+			app.stats.Enabled = false; app.saveStats()
 			app.mu.Unlock(); continue
 		}
 
@@ -439,6 +412,7 @@ func (app *App) handleToggle(w http.ResponseWriter, r *http.Request) {
 	} else {
 		app.status = "stopped"; app.shouldStop.Store(true); app.speedMbps = 0; app.addLog("服务已停止")
 	}
+	app.stats.Enabled = nowRunning
 	app.saveStats(); app.saveTodayLogs()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"is_running": nowRunning})
@@ -472,11 +446,7 @@ func (app *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	date := r.URL.Query().Get("date")
 	app.mu.Lock(); defer app.mu.Unlock()
 	var entries []LogEntry
-	if date == "" || date == app.todayLogsDate {
-		entries = app.todayLogs
-	} else {
-		entries = app.loadLogsFromFile(date)
-	}
+	if date == "" || date == app.todayLogsDate { entries = app.todayLogs } else { entries = app.loadLogsFromFile(date) }
 	if entries == nil { entries = []LogEntry{} }
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"entries": entries})
@@ -534,7 +504,6 @@ func main() {
 	app.loadConfig()
 	app.loadStats()
 
-	// 尝试从文件恢复今日日志（程序重启后不丢失）
 	if entries := app.loadLogsFromFile(app.todayLogsDate); entries != nil {
 		app.todayLogs = entries
 	}
@@ -543,7 +512,17 @@ func main() {
 		app.rollTodayQuota()
 	}
 
-	app.addLog("DownOnly 初始化完成")
+	// 恢复上次运行状态
+	if app.stats.Enabled {
+		app.isRunning.Store(true)
+		app.shouldStop.Store(false)
+		app.status = "running"
+		app.startedAt = time.Now()
+		app.addLog("程序启动，自动恢复上次运行状态")
+	} else {
+		app.addLog("DownOnly 初始化完成")
+	}
+
 	app.saveTodayLogs()
 
 	go app.downloadWorker()
