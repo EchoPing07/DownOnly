@@ -61,49 +61,49 @@ jobs:
             chmod 755 "${pkg_dir}/usr/local/bin/downonly"
 
             # systemd service
-            cat > "${pkg_dir}/etc/systemd/system/downonly.service" <<-'EOF'
-            	[Unit]
-            	Description=DownOnly - Bandwidth Consumption Service
-            	After=network.target
+            cat > "${pkg_dir}/etc/systemd/system/downonly.service" <<'EOF'
+          [Unit]
+          Description=DownOnly - Bandwidth Consumption Service
+          After=network.target
 
-            	[Service]
-            	Type=simple
-            	ExecStart=/usr/local/bin/downonly
-            	Restart=on-failure
-            	RestartSec=5
-            	WorkingDirectory=/var/lib/downonly
-            	StateDirectory=downonly
+          [Service]
+          Type=simple
+          ExecStart=/usr/local/bin/downonly
+          Restart=on-failure
+          RestartSec=5
+          WorkingDirectory=/var/lib/downonly
+          StateDirectory=downonly
 
-            	[Install]
-            	WantedBy=multi-user.target
-            EOF
+          [Install]
+          WantedBy=multi-user.target
+          EOF
 
             # DEBIAN/control
-            cat > "${pkg_dir}/DEBIAN/control" <<-EOF
-            	Package: downonly
-            	Version: ${PKG_VERSION}
-            	Section: utils
-            	Priority: optional
-            	Architecture: ${deb_arch}
-            	Maintainer: downonly <noreply@github.com>
-            	Description: DownOnly - Bandwidth consumption service
-            EOF
+            cat > "${pkg_dir}/DEBIAN/control" <<EOF
+          Package: downonly
+          Version: ${PKG_VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: ${deb_arch}
+          Maintainer: downonly <noreply@github.com>
+          Description: DownOnly - Bandwidth consumption service
+          EOF
 
             # postinst: enable and start service
-            cat > "${pkg_dir}/DEBIAN/postinst" <<-'EOF'
-            	#!/bin/sh
-            	systemctl daemon-reload
-            	systemctl enable downonly.service
-            	systemctl start downonly.service
-            EOF
+            cat > "${pkg_dir}/DEBIAN/postinst" <<'EOF'
+          #!/bin/sh
+          systemctl daemon-reload
+          systemctl enable downonly.service
+          systemctl start downonly.service
+          EOF
             chmod 755 "${pkg_dir}/DEBIAN/postinst"
 
             # prerm: stop service
-            cat > "${pkg_dir}/DEBIAN/prerm" <<-'EOF'
-            	#!/bin/sh
-            	systemctl stop downonly.service || true
-            	systemctl disable downonly.service || true
-            EOF
+            cat > "${pkg_dir}/DEBIAN/prerm" <<'EOF'
+          #!/bin/sh
+          systemctl stop downonly.service || true
+          systemctl disable downonly.service || true
+          EOF
             chmod 755 "${pkg_dir}/DEBIAN/prerm"
 
             dpkg-deb --build "${pkg_dir}"
