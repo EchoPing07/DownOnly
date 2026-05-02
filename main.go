@@ -1,15 +1,19 @@
-package main
+﻿package main
 
 import (
-	_ "embed"
+	"embed"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/rand"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -23,23 +27,63 @@ import (
 //go:embed index.html
 var indexHTML []byte
 
+//go:embed icons
+var iconsFS embed.FS
+
 const dataDir = "data"
 
 var logsDir = filepath.Join(dataDir, "logs")
 
-// ==================== 数据结构 ====================
+var dateRegexp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
-type Config struct {
-	SpeedLimitMbps  int      `json:"speed_limit_mbps"`
-	DailyQuotaMinGB int      `json:"daily_quota_min_gb"`
-	DailyQuotaMaxGB int      `json:"daily_quota_max_gb"`
-	ScheduleStart   string   `json:"schedule_start"`
-	ScheduleEnd     string   `json:"schedule_end"`
-	SleepMinMinutes int      `json:"sleep_min_minutes"`
-	SleepMaxMinutes int      `json:"sleep_max_minutes"`
-	URLs            []string `json:"urls"`
+// 私有/保留地址 CIDR（预解析，避免运行时重复计算）
+var (
+	cidr10         = mustParseCIDR("10.0.0.0/8")
+	cidr172        = mustParseCIDR("172.16.0.0/12")
+	cidr192        = mustParseCIDR("192.168.0.0/16")
+	cidr127        = mustParseCIDR("127.0.0.0/8")
+	cidr169        = mustParseCIDR("169.254.0.0/16")
+	cidrV6Loopback = mustParseCIDR("::1/128")
+	cidrV6Private  = mustParseCIDR("fc00::/7")
+	cidrV6Link     = mustParseCIDR("fe80::/10")
+	privateCIDRs   = []*net.IPNet{cidr10, cidr172, cidr192, cidr127, cidr169, cidrV6Loopback, cidrV6Private, cidrV6Link}
+)
+
+func mustParseCIDR(s string) *net.IPNet {
+	_, n, err := net.ParseCIDR(s)
+	if err != nil { panic("invalid CIDR: " + s) }
+	return n
 }
 
+// --- 数据结构 ---
+
+// Config 应用配置，持久化至 config.json
+type Config struct {
+	SpeedLimitMbps    int      `json:"speed_limit_mbps"`
+	DailyQuotaMinGB   int      `json:"daily_quota_min_gb"`
+	DailyQuotaMaxGB   int      `json:"daily_quota_max_gb"`
+	ScheduleStart     string   `json:"schedule_start"`
+	ScheduleEnd       string   `json:"schedule_end"`
+	SleepMinMinutes   int      `json:"sleep_min_minutes"`
+	SleepMaxMinutes   int      `json:"sleep_max_minutes"`
+	SleepDisabled     bool     `json:"sleep_disabled"`
+	URLs              []string `json:"urls"`
+	AllowPublicAccess bool     `json:"allow_public_access"`
+}
+
+// UnmarshalJSON 兼容旧版 block_public_access 字段
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type Alias Config
+	aux := &struct {
+		BlockPublicAccess *bool `json:"block_public_access"`
+		*Alias
+	}{Alias: (*Alias)(c)}
+	if err := json.Unmarshal(data, aux); err != nil { return err }
+	if aux.BlockPublicAccess != nil && !*aux.BlockPublicAccess { c.AllowPublicAccess = true }
+	return nil
+}
+
+// Stats 流量统计，持久化至 stats.json
 type Stats struct {
 	Daily        map[string]uint64 `json:"daily"`
 	TodayBytes   uint64            `json:"today_bytes"`
@@ -48,11 +92,13 @@ type Stats struct {
 	Enabled      bool              `json:"enabled"`
 }
 
+// LogEntry 单条日志记录
 type LogEntry struct {
 	Time string `json:"time"`
 	Msg  string `json:"msg"`
 }
 
+// App 应用核心结构体，管理配置、统计、日志及下载生命周期
 type App struct {
 	mu sync.Mutex
 
@@ -74,12 +120,9 @@ type App struct {
 	currentSpeedLimit atomic.Int64
 }
 
-func setLowPriority() {
-	syscall.Setpriority(syscall.PRIO_PROCESS, 0, 19)
-}
+// --- 持久化：配置 ---
 
-// ==================== 持久化：配置 ====================
-
+// loadConfig 从 config.json 加载配置，文件不存在时使用默认值
 func (app *App) loadConfig() {
 	data, err := os.ReadFile(filepath.Join(dataDir, "config.json"))
 	if err != nil {
@@ -87,15 +130,19 @@ func (app *App) loadConfig() {
 			SpeedLimitMbps: 5, DailyQuotaMinGB: 150, DailyQuotaMaxGB: 200,
 			ScheduleStart: "00:00", ScheduleEnd: "23:59",
 			SleepMinMinutes: 10, SleepMaxMinutes: 20,
+			AllowPublicAccess: false,
 			URLs: []string{"http://updates-http.cdn-apple.com/2019WinterFCS/fullrestores/041-39257/32129B6C-292C-11E9-9E72-4511412B0A59/iPhone_4.7_12.1.4_16D57_Restore.ipsw"},
 		}
 		app.saveConfig()
 		return
 	}
-	json.Unmarshal(data, &app.config)
+	if err := json.Unmarshal(data, &app.config); err != nil {
+		log.Printf("配置文件解析失败: %v", err)
+	}
 	app.fixConfig()
 }
 
+// fixConfig 修正非法配置值并同步速率限制到原子变量
 func (app *App) fixConfig() {
 	if app.config.SpeedLimitMbps <= 0 { app.config.SpeedLimitMbps = 5 }
 	if app.config.DailyQuotaMinGB <= 0 { app.config.DailyQuotaMinGB = 150 }
@@ -107,48 +154,110 @@ func (app *App) fixConfig() {
 	app.currentSpeedLimit.Store(int64(app.config.SpeedLimitMbps))
 }
 
-func (app *App) saveConfig() {
-	data, _ := json.MarshalIndent(app.config, "", "  ")
-	os.WriteFile(filepath.Join(dataDir, "config.json"), data, 0644)
+// validateTimeStr 校验 HH:MM 格式时间字符串
+func validateTimeStr(s string) bool {
+	parts := strings.Split(s, ":")
+	if len(parts) != 2 { return false }
+	h, err := strconv.Atoi(parts[0])
+	if err != nil || h < 0 || h > 23 { return false }
+	m, err := strconv.Atoi(parts[1])
+	if err != nil || m < 0 || m > 59 { return false }
+	return true
 }
 
-// ==================== 持久化：流量统计 ====================
+// validateConfig 校验完整配置合法性
+func validateConfig(cfg Config) error {
+	if cfg.SpeedLimitMbps < 1 || cfg.SpeedLimitMbps > 1000 {
+		return fmt.Errorf("速率限制须在 1~1000 Mbps 之间")
+	}
+	if cfg.DailyQuotaMinGB < 1 || cfg.DailyQuotaMinGB > 99999 {
+		return fmt.Errorf("每日限额最小值须在 1~99999 GB 之间")
+	}
+	if cfg.DailyQuotaMaxGB < cfg.DailyQuotaMinGB || cfg.DailyQuotaMaxGB > 99999 {
+		return fmt.Errorf("每日限额最大值须大于等于最小值且不超过 99999 GB")
+	}
+	if !validateTimeStr(cfg.ScheduleStart) {
+		return fmt.Errorf("运行开始时间格式不正确，请使用 HH:MM 格式")
+	}
+	if !validateTimeStr(cfg.ScheduleEnd) {
+		return fmt.Errorf("运行结束时间格式不正确，请使用 HH:MM 格式")
+	}
+	if parseTimeStr(cfg.ScheduleStart) == parseTimeStr(cfg.ScheduleEnd) {
+		return fmt.Errorf("运行开始时间与结束时间不能相同")
+	}
+	if !cfg.SleepDisabled {
+		if cfg.SleepMinMinutes < 0 || cfg.SleepMinMinutes > 1440 {
+			return fmt.Errorf("休息间隔最小值须在 0~1440 分钟之间")
+		}
+		if cfg.SleepMaxMinutes < cfg.SleepMinMinutes || cfg.SleepMaxMinutes > 1440 {
+			return fmt.Errorf("休息间隔最大值须大于等于最小值且不超过 1440 分钟")
+		}
+	}
+	return nil
+}
 
+// saveConfig 持久化配置到 config.json
+func (app *App) saveConfig() {
+	data, err := json.MarshalIndent(app.config, "", "  ")
+	if err != nil { log.Printf("配置序列化失败: %v", err); return }
+	if err := os.WriteFile(filepath.Join(dataDir, "config.json"), data, 0600); err != nil {
+		log.Printf("配置文件写入失败: %v", err)
+	}
+}
+
+// --- 持久化：流量统计 ---
+
+// loadStats 从 stats.json 加载流量统计
 func (app *App) loadStats() {
 	data, err := os.ReadFile(filepath.Join(dataDir, "stats.json"))
 	if err != nil {
 		app.stats = Stats{Daily: make(map[string]uint64), TodayDate: time.Now().Format("2006-01-02")}
 		return
 	}
-	json.Unmarshal(data, &app.stats)
+	if err := json.Unmarshal(data, &app.stats); err != nil {
+		log.Printf("统计数据解析失败: %v", err)
+	}
 	if app.stats.Daily == nil { app.stats.Daily = make(map[string]uint64) }
 }
 
+// saveStats 持久化流量统计到 stats.json
 func (app *App) saveStats() {
-	data, _ := json.MarshalIndent(app.stats, "", "  ")
-	os.WriteFile(filepath.Join(dataDir, "stats.json"), data, 0644)
+	data, err := json.MarshalIndent(app.stats, "", "  ")
+	if err != nil { log.Printf("统计序列化失败: %v", err); return }
+	if err := os.WriteFile(filepath.Join(dataDir, "stats.json"), data, 0600); err != nil {
+		log.Printf("统计文件写入失败: %v", err)
+	}
 }
 
-// ==================== 持久化：按天日志 ====================
+// --- 持久化：按天日志 ---
 
+// logFilePath 返回指定日期的日志文件路径
 func (app *App) logFilePath(date string) string {
 	return filepath.Join(logsDir, "log-"+date+".json")
 }
 
+// loadLogsFromFile 从指定日期的日志文件加载条目
 func (app *App) loadLogsFromFile(date string) []LogEntry {
 	data, err := os.ReadFile(app.logFilePath(date))
 	if err != nil { return nil }
 	var result struct { Entries []LogEntry `json:"entries"` }
-	json.Unmarshal(data, &result)
+	if err := json.Unmarshal(data, &result); err != nil {
+		log.Printf("日志文件 %s 解析失败: %v", date, err)
+	}
 	return result.Entries
 }
 
+// saveTodayLogs 持久化当日日志到文件
 func (app *App) saveTodayLogs() {
 	if len(app.todayLogs) == 0 { return }
-	data, _ := json.MarshalIndent(map[string]interface{}{"entries": app.todayLogs}, "", "  ")
-	os.WriteFile(app.logFilePath(app.todayLogsDate), data, 0644)
+	data, err := json.MarshalIndent(map[string]interface{}{"entries": app.todayLogs}, "", "  ")
+	if err != nil { log.Printf("日志序列化失败: %v", err); return }
+	if err := os.WriteFile(app.logFilePath(app.todayLogsDate), data, 0600); err != nil {
+		log.Printf("日志文件写入失败: %v", err)
+	}
 }
 
+// addLog 追加日志条目，超出上限时淘汰最早的记录
 func (app *App) addLog(msg string) {
 	app.todayLogs = append(app.todayLogs, LogEntry{
 		Time: time.Now().Format("15:04:05"),
@@ -159,6 +268,7 @@ func (app *App) addLog(msg string) {
 	}
 }
 
+// getLogDates 获取所有可用日志日期，按降序排列
 func (app *App) getLogDates() []string {
 	dateSet := make(map[string]bool)
 	dateSet[app.todayLogsDate] = true
@@ -178,6 +288,7 @@ func (app *App) getLogDates() []string {
 	return dates
 }
 
+// cleanOldLogs 清理超过 7 天的历史日志文件
 func (app *App) cleanOldLogs() {
 	cutoff := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
 	files, err := os.ReadDir(logsDir)
@@ -194,8 +305,9 @@ func (app *App) cleanOldLogs() {
 	}
 }
 
-// ==================== 随机额度 ====================
+// --- 随机额度 ---
 
+// rollTodayQuota 在 [min, max] 范围内随机生成今日流量限额
 func (app *App) rollTodayQuota() {
 	min := app.config.DailyQuotaMinGB
 	max := app.config.DailyQuotaMaxGB
@@ -205,8 +317,9 @@ func (app *App) rollTodayQuota() {
 	app.addLog(fmt.Sprintf("今日流量限额已生成: %d GB", app.stats.TodayQuotaGB))
 }
 
-// ==================== 日期与调度 ====================
+// --- 日期与调度 ---
 
+// checkDateChange 日期变更时重置计数器、归档昨日数据、清理过期日志和统计
 func (app *App) checkDateChange() {
 	today := time.Now().Format("2006-01-02")
 	if app.stats.TodayDate == today { return }
@@ -227,6 +340,7 @@ func (app *App) checkDateChange() {
 	}
 }
 
+// parseTimeStr 将 HH:MM 解析为自午夜起的分钟数
 func parseTimeStr(s string) int {
 	parts := strings.Split(s, ":")
 	if len(parts) != 2 { return 0 }
@@ -235,6 +349,7 @@ func parseTimeStr(s string) int {
 	return h*60 + m
 }
 
+// isInSchedule 判断当前时间是否在配置的运行时段内，支持跨午夜
 func (app *App) isInSchedule() bool {
 	nowMin := time.Now().Hour()*60 + time.Now().Minute()
 	start := parseTimeStr(app.config.ScheduleStart)
@@ -243,11 +358,13 @@ func (app *App) isInSchedule() bool {
 	return nowMin >= start || nowMin <= end
 }
 
+// isQuotaReached 判断今日流量是否已达限额
 func (app *App) isQuotaReached() bool {
 	if app.stats.TodayQuotaGB <= 0 { return false }
 	return app.stats.TodayBytes >= uint64(app.stats.TodayQuotaGB)*1_000_000_000
 }
 
+// sleepWithCheck 可中断的休眠，每秒检测 isRunning 状态
 func (app *App) sleepWithCheck(seconds int) {
 	for i := 0; i < seconds; i++ {
 		if !app.isRunning.Load() { return }
@@ -255,8 +372,9 @@ func (app *App) sleepWithCheck(seconds int) {
 	}
 }
 
-// ==================== 下载引擎 ====================
+// --- 下载引擎 ---
 
+// userAgents 轮换使用的 User-Agent 列表
 var userAgents = []string{
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
 	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
@@ -264,6 +382,7 @@ var userAgents = []string{
 	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
 }
 
+// downloadWorker 主下载循环：检查调度/额度 → 选择地址 → 执行下载 → 休眠
 func (app *App) downloadWorker() {
 	for {
 		if !app.isRunning.Load() { time.Sleep(time.Second); continue }
@@ -279,6 +398,7 @@ func (app *App) downloadWorker() {
 		}
 		urls := make([]string, len(app.config.URLs)); copy(urls, app.config.URLs)
 		sleepMin := app.config.SleepMinMinutes; sleepMax := app.config.SleepMaxMinutes
+		sleepDisabled := app.config.SleepDisabled
 		app.mu.Unlock()
 
 		if len(urls) == 0 {
@@ -288,29 +408,71 @@ func (app *App) downloadWorker() {
 			app.mu.Unlock(); continue
 		}
 
-		url := urls[rand.Intn(len(urls))]
-		app.mu.Lock(); app.status = "running"; app.shouldStop.Store(false)
-		app.addLog("开始下载: " + url); app.mu.Unlock()
+		// 多地址随机顺序尝试，单地址重试一次
+		var tryURLs []string
+		if len(urls) == 1 {
+			tryURLs = []string{urls[0], urls[0]}
+		} else {
+			shuffled := make([]string, len(urls))
+			copy(shuffled, urls)
+			rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+			tryURLs = shuffled
+		}
 
-		downloaded, err := app.doDownload(url)
+		var lastErr error
+		var succeeded bool
+		for _, u := range tryURLs {
+			if !app.isRunning.Load() { break }
+			if !isAllowedURL(u) {
+				app.mu.Lock(); app.addLog("URL 不安全，已跳过: " + u); app.mu.Unlock()
+				continue
+			}
+			app.mu.Lock(); app.status = "running"; app.shouldStop.Store(false)
+			app.addLog("开始下载: " + u); app.mu.Unlock()
 
-		app.mu.Lock()
-		if err != nil { app.addLog(fmt.Sprintf("下载异常: %v (已传输 %s)", err, formatBytes(downloaded)))
-		} else { app.addLog(fmt.Sprintf("下载完成: %s", formatBytes(downloaded))) }
-		app.mu.Unlock()
+			downloaded, err := app.doDownload(u)
+
+			app.mu.Lock()
+			if err != nil {
+				app.addLog(fmt.Sprintf("下载异常: %v (已传输 %s)", err, formatBytes(downloaded)))
+				lastErr = err
+			} else {
+				app.addLog(fmt.Sprintf("下载完成: %s", formatBytes(downloaded)))
+				succeeded = true
+			}
+			app.mu.Unlock()
+
+			if succeeded { break }
+			if app.isRunning.Load() {
+				app.mu.Lock(); app.addLog("下载失败，切换到下一个地址"); app.mu.Unlock()
+			}
+		}
 
 		if !app.isRunning.Load() { continue }
 
-		if sleepMax < sleepMin { sleepMax = sleepMin }
-		sleepMinSec := sleepMin * 60; sleepMaxSec := sleepMax * 60
-		sleepSec := sleepMinSec
-		if sleepMaxSec > sleepMinSec { sleepSec = rand.Intn(sleepMaxSec-sleepMinSec) + sleepMinSec }
-		app.mu.Lock(); app.status = "sleeping"
-		app.addLog(fmt.Sprintf("休息 %d 分 %d 秒", sleepSec/60, sleepSec%60)); app.mu.Unlock()
-		app.sleepWithCheck(sleepSec)
+		if !succeeded && lastErr != nil {
+			if !sleepDisabled {
+				if sleepMax < sleepMin { sleepMax = sleepMin }
+				sleepMinSec := sleepMin * 60; sleepMaxSec := sleepMax * 60
+				sleepSec := sleepMinSec
+				if sleepMaxSec > sleepMinSec { sleepSec = rand.Intn(sleepMaxSec-sleepMinSec) + sleepMinSec }
+				app.mu.Lock(); app.status = "sleeping"
+				app.addLog(fmt.Sprintf("所有地址均失败，休息 %d 分 %d 秒", sleepSec/60, sleepSec%60)); app.mu.Unlock()
+				app.sleepWithCheck(sleepSec)
+			}
+		} else if succeeded && !sleepDisabled {
+			if sleepMax < sleepMin { sleepMax = sleepMin }
+			sleepMinSec := sleepMin * 60; sleepMaxSec := sleepMax * 60
+			sleepSec := sleepMinSec
+			if sleepMaxSec > sleepMinSec { sleepSec = rand.Intn(sleepMaxSec-sleepMinSec) + sleepMinSec }
+			app.mu.Lock(); app.status = "sleeping"
+			app.addLog(fmt.Sprintf("休息 %d 分 %d 秒", sleepSec/60, sleepSec%60)); app.mu.Unlock()
+			app.sleepWithCheck(sleepSec)
+		}
 	}
 }
 
+// doDownload 执行单次 HTTP 下载，按速率限制节流并累计流量
 func (app *App) doDownload(url string) (uint64, error) {
 	client := &http.Client{
 		Timeout:   2 * time.Hour,
@@ -357,8 +519,9 @@ func (app *App) doDownload(url string) (uint64, error) {
 	}
 }
 
-// ==================== 后台协程 ====================
+// --- 后台协程 ---
 
+// speedTracker 每秒更新速率、累计流量、检查调度/额度状态
 func (app *App) speedTracker() {
 	for range time.NewTicker(time.Second).C {
 		delta := app.bytesAccumulator.Swap(0)
@@ -380,6 +543,7 @@ func (app *App) speedTracker() {
 	}
 }
 
+// autoSaver 每 60 秒定时持久化统计和日志
 func (app *App) autoSaver() {
 	for range time.NewTicker(60 * time.Second).C {
 		app.mu.Lock()
@@ -389,8 +553,9 @@ func (app *App) autoSaver() {
 	}
 }
 
-// ==================== HTTP API ====================
+// --- HTTP API ---
 
+// handleStatus 返回运行状态、速率、历史流量等实时信息
 func (app *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	app.mu.Lock(); defer app.mu.Unlock()
 	var uptime int64
@@ -403,6 +568,7 @@ func (app *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleToggle 切换服务启停状态
 func (app *App) handleToggle(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" { http.Error(w, "", 405); return }
 	app.mu.Lock(); defer app.mu.Unlock()
@@ -418,6 +584,7 @@ func (app *App) handleToggle(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]bool{"is_running": nowRunning})
 }
 
+// handleHistory 返回指定月份每日流量数据
 func (app *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	month, err := strconv.Atoi(r.URL.Query().Get("month"))
 	if err != nil || month < 1 || month > 12 { month = int(time.Now().Month()) }
@@ -436,14 +603,20 @@ func (app *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"month": month, "month_total_bytes": totalBytes, "days": days})
 }
 
+// handleLogDates 返回所有可用日志日期列表
 func (app *App) handleLogDates(w http.ResponseWriter, r *http.Request) {
 	app.mu.Lock(); defer app.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(app.getLogDates())
 }
 
+// handleLogs 返回指定日期的日志条目，默认返回当日
 func (app *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	date := r.URL.Query().Get("date")
+	if date != "" && !dateRegexp.MatchString(date) {
+		http.Error(w, "Invalid date format", http.StatusBadRequest)
+		return
+	}
 	app.mu.Lock(); defer app.mu.Unlock()
 	var entries []LogEntry
 	if date == "" || date == app.todayLogsDate { entries = app.todayLogs } else { entries = app.loadLogsFromFile(date) }
@@ -452,16 +625,56 @@ func (app *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"entries": entries})
 }
 
+// handleTestURL 探测指定 URL 的可达性（HEAD 请求）
+func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
+	rawURL := r.URL.Query().Get("url")
+	if rawURL == "" || !isAllowedURL(rawURL) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
+		return
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	req, err := http.NewRequest("HEAD", rawURL, nil)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
+		return
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
+		return
+	}
+	resp.Body.Close()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": resp.StatusCode >= 200 && resp.StatusCode < 400})
+}
+
+// handleConfig GET 返回当前配置，POST 更新配置
 func (app *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method == "POST" {
 		var cfg Config
-		if json.NewDecoder(r.Body).Decode(&cfg) != nil { http.Error(w, "", 400); return }
+		if json.NewDecoder(r.Body).Decode(&cfg) != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": "请求格式错误"})
+			return
+		}
+		if err := validateConfig(cfg); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]interface{}{"ok": false, "error": err.Error()})
+			return
+		}
 		app.mu.Lock()
 		app.config = cfg; app.fixConfig(); app.saveConfig()
-		app.addLog(fmt.Sprintf("配置已更新: %d Mbps, %d~%d GB/天, %s-%s, 休息 %d~%d 分钟",
+		sleepInfo := fmt.Sprintf("休息 %d~%d 分钟", app.config.SleepMinMinutes, app.config.SleepMaxMinutes)
+		if app.config.SleepDisabled { sleepInfo = "休息已禁用" }
+		app.addLog(fmt.Sprintf("配置已更新: %d Mbps, %d~%d GB/天, %s-%s, %s, 允许公网: %v",
 			app.config.SpeedLimitMbps, app.config.DailyQuotaMinGB, app.config.DailyQuotaMaxGB,
 			app.config.ScheduleStart, app.config.ScheduleEnd,
-			app.config.SleepMinMinutes, app.config.SleepMaxMinutes))
+			sleepInfo, app.config.AllowPublicAccess))
 		if app.stats.TodayQuotaGB < app.config.DailyQuotaMinGB || app.stats.TodayQuotaGB > app.config.DailyQuotaMaxGB {
 			app.rollTodayQuota()
 		}
@@ -475,8 +688,76 @@ func (app *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(app.config)
 }
 
-// ==================== 工具函数 ====================
+// --- 安全工具 ---
 
+// isPrivateIP 判断 IP 是否为私有/保留地址（RFC 1918、环回、链路本地等）
+func isPrivateIP(ip net.IP) bool {
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return true
+	}
+	for _, cidr := range privateCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// getRemoteIP 从请求中提取客户端 IP
+func getRemoteIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// blockPublicMiddleware 公网访问拦截中间件，未开启公网访问时仅允许私有地址
+func (app *App) blockPublicMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !app.config.AllowPublicAccess {
+			ip := net.ParseIP(getRemoteIP(r))
+			if ip == nil || !isPrivateIP(ip) {
+				http.Error(w, "Forbidden", http.StatusForbidden)
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+// isAllowedURL 校验下载地址安全性：仅允许公网 HTTP(S)，防止 SSRF 攻击
+func isAllowedURL(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	hostname := u.Hostname()
+	if hostname == "" {
+		return false
+	}
+	if hostname == "localhost" || hostname == "[::1]" {
+		return false
+	}
+	ip := net.ParseIP(hostname)
+	if ip != nil {
+		return !isPrivateIP(ip)
+	}
+	// DNS 解析后检查所有 IP，防止 DNS Rebinding 绕过
+	ips, err := net.LookupIP(hostname)
+	if err != nil { return false }
+	for _, ip := range ips {
+		if isPrivateIP(ip) { return false }
+	}
+	return true
+}
+
+// --- 工具函数 ---
+
+// formatBytes 字节量格式化为人类可读单位（B/MB/GB/TB）
 func formatBytes(b uint64) string {
 	switch {
 	case b >= 1_000_000_000_000: return fmt.Sprintf("%.2f TB", float64(b)/1e12)
@@ -486,8 +767,9 @@ func formatBytes(b uint64) string {
 	}
 }
 
-// ==================== 启动入口 ====================
+// --- 启动入口 ---
 
+// main 初始化应用、恢复状态、注册路由、启动 HTTP 服务
 func main() {
 	setLowPriority()
 	debug.SetGCPercent(200)
@@ -529,17 +811,33 @@ func main() {
 	go app.speedTracker()
 	go app.autoSaver()
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/", app.blockPublicMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" { http.NotFound(w, r); return }
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(indexHTML)
-	})
-	http.HandleFunc("/api/status", app.handleStatus)
-	http.HandleFunc("/api/toggle", app.handleToggle)
-	http.HandleFunc("/api/history", app.handleHistory)
-	http.HandleFunc("/api/log_dates", app.handleLogDates)
-	http.HandleFunc("/api/logs", app.handleLogs)
-	http.HandleFunc("/api/config", app.handleConfig)
+	}))
+	http.HandleFunc("/api/status", app.blockPublicMiddleware(app.handleStatus))
+	http.HandleFunc("/api/toggle", app.blockPublicMiddleware(app.handleToggle))
+	http.HandleFunc("/api/history", app.blockPublicMiddleware(app.handleHistory))
+	http.HandleFunc("/api/log_dates", app.blockPublicMiddleware(app.handleLogDates))
+	http.HandleFunc("/api/logs", app.blockPublicMiddleware(app.handleLogs))
+	http.HandleFunc("/api/config", app.blockPublicMiddleware(app.handleConfig))
+	http.HandleFunc("/api/test_url", app.blockPublicMiddleware(app.handleTestURL))
+
+	http.HandleFunc("/icons/", app.blockPublicMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/icons/")
+		if name == "" || strings.Contains(name, "..") || strings.Contains(name, "/") {
+			http.NotFound(w, r); return
+		}
+		data, err := iconsFS.ReadFile("icons/" + name)
+		if err != nil { http.NotFound(w, r); return }
+		ct := "image/svg+xml"
+		if strings.HasSuffix(name, ".png") { ct = "image/png" }
+		if strings.HasSuffix(name, ".jpg") || strings.HasSuffix(name, ".jpeg") { ct = "image/jpeg" }
+		w.Header().Set("Content-Type", ct)
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		w.Write(data)
+	}))
 
 	go func() {
 		c := make(chan os.Signal, 1)
@@ -559,5 +857,11 @@ func main() {
 	port := "8080"
 	if len(os.Args) > 1 { port = os.Args[1] }
 	fmt.Printf("DownOnly 已启动 → http://0.0.0.0:%s\n", port)
-	http.ListenAndServe("0.0.0.0:"+port, nil)
+	srv := &http.Server{
+		Addr:         "0.0.0.0:" + port,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 0, // 下载接口需要长时间写入
+		IdleTimeout:  120 * time.Second,
+	}
+	log.Fatal(srv.ListenAndServe())
 }

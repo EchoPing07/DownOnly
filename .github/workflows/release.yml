@@ -26,10 +26,95 @@ jobs:
       - name: Build binaries
         run: |
           VERSION=${GITHUB_REF_NAME}
+          # x86_64
           GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "downonly-linux-amd64-${VERSION}" main.go
+          # ARM64
           GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o "downonly-linux-arm64-${VERSION}" main.go
+          # ARMv7
+          GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o "downonly-linux-armv7-${VERSION}" main.go
+          # ARMv6
+          GOOS=linux GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o "downonly-linux-armv6-${VERSION}" main.go
+          # MIPS
+          GOOS=linux GOARCH=mips GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips-${VERSION}" main.go
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mipsle-${VERSION}" main.go
+          # MIPS64
+          GOOS=linux GOARCH=mips64 GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips64-${VERSION}" main.go
+          GOOS=linux GOARCH=mips64le GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips64le-${VERSION}" main.go
 
-      # 2. 上传到 Release
+      # 2. 构建 deb 包
+      - name: Build deb packages
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          # 去掉 v 前缀作为包版本号
+          PKG_VERSION=${VERSION#v}
+
+          build_deb() {
+            local arch=$1 binary=$2 deb_arch=$3
+            local pkg_name="downonly_${PKG_VERSION}_${deb_arch}"
+            local pkg_dir="${pkg_name}"
+
+            mkdir -p "${pkg_dir}/usr/local/bin"
+            mkdir -p "${pkg_dir}/etc/systemd/system"
+            mkdir -p "${pkg_dir}/DEBIAN"
+
+            cp "${binary}" "${pkg_dir}/usr/local/bin/downonly"
+            chmod 755 "${pkg_dir}/usr/local/bin/downonly"
+
+            # systemd service
+            cat > "${pkg_dir}/etc/systemd/system/downonly.service" <<-'EOF'
+            	[Unit]
+            	Description=DownOnly - Bandwidth Consumption Service
+            	After=network.target
+
+            	[Service]
+            	Type=simple
+            	ExecStart=/usr/local/bin/downonly
+            	Restart=on-failure
+            	RestartSec=5
+            	WorkingDirectory=/var/lib/downonly
+            	StateDirectory=downonly
+
+            	[Install]
+            	WantedBy=multi-user.target
+            EOF
+
+            # DEBIAN/control
+            cat > "${pkg_dir}/DEBIAN/control" <<-EOF
+            	Package: downonly
+            	Version: ${PKG_VERSION}
+            	Section: utils
+            	Priority: optional
+            	Architecture: ${deb_arch}
+            	Maintainer: downonly <noreply@github.com>
+            	Description: DownOnly - Bandwidth consumption service
+            EOF
+
+            # postinst: enable and start service
+            cat > "${pkg_dir}/DEBIAN/postinst" <<-'EOF'
+            	#!/bin/sh
+            	systemctl daemon-reload
+            	systemctl enable downonly.service
+            	systemctl start downonly.service
+            EOF
+            chmod 755 "${pkg_dir}/DEBIAN/postinst"
+
+            # prerm: stop service
+            cat > "${pkg_dir}/DEBIAN/prerm" <<-'EOF'
+            	#!/bin/sh
+            	systemctl stop downonly.service || true
+            	systemctl disable downonly.service || true
+            EOF
+            chmod 755 "${pkg_dir}/DEBIAN/prerm"
+
+            dpkg-deb --build "${pkg_dir}"
+            rm -rf "${pkg_dir}"
+          }
+
+          build_deb amd64 "downonly-linux-amd64-${VERSION}" amd64
+          build_deb arm64 "downonly-linux-arm64-${VERSION}" arm64
+          build_deb armhf "downonly-linux-armv7-${VERSION}" armhf
+
+      # 3. 上传到 Release
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
@@ -37,19 +122,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 3. 设置多架构环境
+      # 4. 设置多架构环境
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 4. 将仓库名转换为全小写
+      # 5. 将仓库名转换为全小写
       - name: Lowercase repo name
         run: |
           echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
-      # 5. 登录 GHCR
+      # 6. 登录 GHCR
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -57,20 +142,20 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 6. 登录 Docker Hub
+      # 7. 登录 Docker Hub
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 7. 构建并推送镜像
+      # 8. 构建并推送镜像
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           tags: |
             ${{ env.IMAGE_NAME }}:latest
             ${{ env.IMAGE_NAME }}:${{ github.ref_name }}

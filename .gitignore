@@ -13,3 +13,6 @@ obj/
 # æ“ä½œç³»ç»Ÿä¸´æ—¶æ–‡ä»¶
 .DS_Store
 Thumbs.db
+
+# Obsidian ±à¼­Æ÷ÅäÖÃ
+.obsidian/

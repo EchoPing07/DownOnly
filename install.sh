@@ -38,7 +38,7 @@ echo -e "${Y} DownOnly 自动安装程序${W}"
 echo ""
 
 # ========== 检测架构 ==========
-echo -e "${B}[1/8]${W} 检测系统架构..."
+echo -e "${B}[1/9]${W} 检测系统架构..."
 ARCH=$(uname -m)
 case $ARCH in
     x86_64) GOARCH="amd64" ;;
@@ -51,7 +51,7 @@ esac
 echo -e "      架构: ${G}${GOARCH}${W}"
 
 # ========== 获取最新版本 ==========
-echo -e "${B}[2/8]${W} 获取最新版本..."
+echo -e "${B}[2/9]${W} 获取最新版本..."
 LATEST=$(curl -s "$API_URL" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
 if [ -z "$LATEST" ]; then
     echo -e "${R}无法获取版本信息${W}"
@@ -60,39 +60,66 @@ fi
 echo -e "      版本: ${G}${LATEST}${W}"
 
 # ========== 尝试下载预编译文件 ==========
-echo -e "${B}[3/8]${W} 尝试下载预编译文件..."
+echo -e "${B}[3/9]${W} 尝试下载预编译文件..."
 DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/downonly-linux-${GOARCH}-${LATEST}"
 
-mkdir -p ${APP_DIR}/data
-cd ${APP_DIR}
+mkdir -p "${APP_DIR}/data"
+cd "${APP_DIR}"
 
-if wget -q --show-progress -O downonly "$DOWNLOAD_URL" 2>/dev/null; then
+if wget -q --show-progress -O downonly "$DOWNLOAD_URL" 2>&1; then
     echo -e "${G}      下载成功${W}"
+    # SHA256 校验（如果存在校验文件）
+    SHA256_URL="${DOWNLOAD_URL}.sha256"
+    if wget -q -O downonly.sha256 "$SHA256_URL" 2>/dev/null; then
+        EXPECTED=$(awk '{print $1}' downonly.sha256)
+        ACTUAL=$(sha256sum downonly | awk '{print $1}')
+        if [ "$EXPECTED" = "$ACTUAL" ]; then
+            echo -e "${G}      SHA256 校验通过${W}"
+        else
+            echo -e "${R}      SHA256 校验失败，文件可能被篡改${W}"
+            rm -f downonly downonly.sha256
+            exit 1
+        fi
+        rm -f downonly.sha256
+    else
+        echo -e "${Y}      未找到校验文件，跳过校验${W}"
+    fi
     chmod +x downonly
 else
     echo -e "${Y}      预编译文件不存在，准备本地编译...${W}"
     
     # ========== 检查 Go 环境 ==========
-    echo -e "${B}[4/8]${W} 检查 Go 环境..."
+    echo -e "${B}[4/9]${W} 检查 Go 环境..."
     if ! command -v go &> /dev/null; then
-        echo -e "${Y}      未检测到 Go，开始安装...${W}"
+        echo -e "${Y}      未检测到 Go，开始安装依赖...${W}"
         
-        apt update -qq && apt install -y wget tar git > /dev/null 2>&1
+        if command -v apt &> /dev/null; then
+            apt update -qq && apt install -y wget tar git > /dev/null 2>&1
+        elif command -v yum &> /dev/null; then
+            yum install -y wget tar git > /dev/null 2>&1
+        elif command -v apk &> /dev/null; then
+            apk add wget tar git > /dev/null 2>&1
+        else
+            echo -e "${R}      无法检测包管理器，请手动安装 wget, tar, git${W}"
+            exit 1
+        fi
         
         GO_VERSION="1.22.5"
         GO_FILE="go${GO_VERSION}.linux-${GOARCH}.tar.gz"
         
         cd /tmp
-        wget -q --show-progress https://golang.google.cn/dl/${GO_FILE}
-        tar -C /usr/local -xzf ${GO_FILE}
-        rm ${GO_FILE}
+        GO_URL_CN="https://golang.google.cn/dl/${GO_FILE}"
+        GO_URL_OFFICIAL="https://go.dev/dl/${GO_FILE}"
+        if ! wget -q --show-progress -O "${GO_FILE}" "${GO_URL_CN}" 2>&1; then
+            echo -e "${Y}      国内源下载失败，尝试官方源...${W}"
+            wget -q --show-progress -O "${GO_FILE}" "${GO_URL_OFFICIAL}" 2>&1
+        fi
+        tar -C /usr/local -xzf "${GO_FILE}"
+        rm -f "${GO_FILE}"
         
         export PATH=$PATH:/usr/local/go/bin
-        export GOPATH=$HOME/go
+        export GOPATH=/root/go
         export GOCACHE=/tmp/go-cache
-        echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
-        echo 'export GOPATH=$HOME/go' >> ~/.bashrc
-        echo 'export GOCACHE=/tmp/go-cache' >> ~/.bashrc
         
         echo -e "${G}      Go 安装完成${W}"
     else
@@ -100,19 +127,19 @@ else
     fi
     
     # ========== 本地编译 ==========
-    echo -e "${B}[5/8]${W} 开始编译（约需 2-3 分钟）..."
+    echo -e "${B}[5/9]${W} 开始编译（约需 2-3 分钟）..."
     cd /tmp
-    rm -rf downonly-build
-    git clone --depth 1 https://github.com/${REPO}.git downonly-build
-    cd downonly-build
-    go build -ldflags="-s -w" -o ${APP_DIR}/downonly main.go
-    cd ${APP_DIR}
+    rm -rf /tmp/downonly-build
+    git clone --depth 1 "https://github.com/${REPO}.git" /tmp/downonly-build
+    cd /tmp/downonly-build
+    go build -ldflags="-s -w" -o "${APP_DIR}/downonly" .
+    cd "${APP_DIR}"
     rm -rf /tmp/downonly-build
     echo -e "${G}      编译完成${W}"
 fi
 
 # ========== 安装管理脚本 ==========
-echo -e "${B}[6/8]${W} 安装管理脚本..."
+echo -e "${B}[6/9]${W} 安装管理脚本..."
 cat > /usr/local/bin/downonly << 'MANAGER_SCRIPT'
 #!/bin/bash
 
@@ -192,14 +219,34 @@ do_update() {
     echo -e " 正在下载..."
     systemctl stop $SERVICE
     
-    if wget -q --show-progress -O ${APP_DIR}/downonly.new "$DOWNLOAD_URL"; then
-        chmod +x ${APP_DIR}/downonly.new
-        mv ${APP_DIR}/downonly.new ${APP_DIR}/downonly
+    if wget -q --show-progress -O "${APP_DIR}/downonly.new" "$DOWNLOAD_URL"; then
+        # SHA256 校验（如果存在）
+        SHA256_URL="${DOWNLOAD_URL}.sha256"
+        if wget -q -O "${APP_DIR}/downonly.new.sha256" "$SHA256_URL" 2>/dev/null; then
+            EXPECTED=$(awk '{print $1}' "${APP_DIR}/downonly.new.sha256")
+            ACTUAL=$(sha256sum "${APP_DIR}/downonly.new" | awk '{print $1}')
+            if [ "$EXPECTED" != "$ACTUAL" ]; then
+                echo -e "${R} SHA256 校验失败${W}"
+                rm -f "${APP_DIR}/downonly.new" "${APP_DIR}/downonly.new.sha256"
+                systemctl start $SERVICE
+                sleep 2
+                return 1
+            fi
+            rm -f "${APP_DIR}/downonly.new.sha256"
+        fi
+        chmod +x "${APP_DIR}/downonly.new"
+        mv "${APP_DIR}/downonly.new" "${APP_DIR}/downonly"
         systemctl start $SERVICE
         echo -e "${G} 更新成功！${W}"
     else
-        echo -e "${R} 下载失败${W}"
-        systemctl start $SERVICE
+        echo -e "${R} 下载失败，尝试回滚...${W}"
+        rm -f "${APP_DIR}/downonly.new"
+        if [ -f "${APP_DIR}/downonly" ] && [ -x "${APP_DIR}/downonly" ]; then
+            systemctl start $SERVICE
+            echo -e "${Y} 已回滚到旧版本并重启服务${W}"
+        else
+            echo -e "${R} 无可用版本，请手动处理${W}"
+        fi
     fi
     
     sleep 2
@@ -212,7 +259,7 @@ while true; do
         1) systemctl start $SERVICE && echo -e " 已启动" && sleep 1 ;;
         2) systemctl stop $SERVICE && echo -e " 已停止" && sleep 1 ;;
         3) systemctl restart $SERVICE && echo -e " 已重启" && sleep 1.5 ;;
-        4) clear && echo -e "${Y} [按 Ctrl+C 返回菜单] ${W}" && echo "" && tail -n 100 -f ${APP_DIR}/data/sys_out.log 2>/dev/null || echo "日志文件不存在" ;;
+        4) clear && echo -e "${Y} [按 Ctrl+C 返回菜单] ${W}" && echo "" && tail -n 100 -f "${APP_DIR}/data/sys_out.log" 2>/dev/null || true ;;
         5) do_update ;;
         6) echo ""; read -p " 是否保留数据? (y保留/n全删): " keep
            systemctl stop $SERVICE &>/dev/null
@@ -220,10 +267,10 @@ while true; do
            rm -f /etc/systemd/system/$SERVICE.service
            systemctl daemon-reload
            if [[ $keep == "y" ]]; then
-               rm -f ${APP_DIR}/downonly
+               rm -f "${APP_DIR}/downonly"
                echo -e "${G} 已卸载，数据已保留${W}"
            else
-               rm -rf ${APP_DIR}
+               rm -rf "${APP_DIR}"
                echo -e "${G} 已卸载并清除所有数据${W}"
            fi
            rm -f /usr/local/bin/downonly
@@ -238,7 +285,7 @@ chmod +x /usr/local/bin/downonly
 echo -e "${G}      完成${W}"
 
 # ========== 配置 systemd 服务 ==========
-echo -e "${B}[7/8]${W} 配置系统服务..."
+echo -e "${B}[7/9]${W} 配置系统服务..."
 cat > /etc/systemd/system/downonly.service << 'SERVICE_FILE'
 [Unit]
 Description=DownOnly Traffic Guard
@@ -261,8 +308,26 @@ systemctl enable downonly
 systemctl start downonly
 echo -e "${G}      完成${W}"
 
+# ========== 配置日志轮转 ==========
+echo -e "${B}[8/9]${W} 配置日志轮转..."
+cat > /etc/logrotate.d/downonly << 'LOGROTATE'
+/root/downonly/data/sys_out.log
+/root/downonly/data/sys_err.log
+{
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+    maxsize 50M
+}
+LOGROTATE
+echo -e "${G}      完成${W}"
+
 # ========== 完成 ==========
-echo -e "${B}[8/8]${W} 安装完成！"
+echo -e "${B}[9/9]${W} 安装完成！"
 echo ""
 echo -e "${G}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${W}"
 IP=$(hostname -I | awk '{print $1}')

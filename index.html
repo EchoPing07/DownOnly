@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>DownOnly</title>
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg width='512' height='512' viewBox='0 0 512 512' fill='none' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='512' height='512' rx='112' fill='%233b82f6'/%3E%3Cg stroke='%23ffffff' stroke-width='28' stroke-linecap='round'%3E%3Cpath d='M120 256C120 180.89 180.89 120 256 120C300 120 338 140 365 172' /%3E%3Cpath d='M392 256C392 331.11 331.11 392 256 392C212 392 174 372 147 340' /%3E%3Cpath d='M185 256C185 216.79 216.79 185 256 185C280 185 302 198 315 218' /%3E%3Cpath d='M327 256C327 295.21 295.21 327 256 327C232 327 210 314 197 294' /%3E%3Ccircle cx='256' cy='256' r='14' fill='%23ffffff' stroke='none'/%3E%3C/g%3E%3C/svg%3E">
+    <link rel="icon" type="image/svg+xml" href="icons/logo.svg">
     <script>(function(){var t=localStorage.getItem('downonly-theme');if(t==='dark'||(!t&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark')}})();</script>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
@@ -22,36 +22,38 @@
         input[type="time"] { -webkit-appearance: none; }
         .log-line { transition: all 0.15s ease; }
         .log-line.expanded { white-space: normal; word-break: break-all; }
+        .icon-container { display: inline-flex; align-items: center; justify-content: center; }
+        .icon-container svg { display: block; }
+
+        .toast-container { position: fixed; top: 80px; left: 50%; transform: translateX(-50%); z-index: 9999; display: flex; flex-direction: column; align-items: center; gap: 8px; pointer-events: none; }
+        .toast { padding: 10px 24px; border-radius: 12px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(239,68,68,0.92); backdrop-filter: blur(8px); box-shadow: 0 4px 20px rgba(0,0,0,0.15); opacity: 0; transform: translateY(-12px); transition: all 0.3s ease; pointer-events: auto; }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        input:disabled { opacity: 0.4; cursor: not-allowed; }
     </style>
 </head>
 <body class="bg-slate-50 text-slate-800 dark:bg-dark dark:text-slate-200 min-h-screen flex flex-col relative antialiased">
 
+    <div id="toast-container" class="toast-container"></div>
+
     <nav class="sticky top-0 z-40 bg-white/80 dark:bg-cardDark/80 backdrop-blur-md border-b border-slate-200 dark:border-slate-800">
         <div class="max-w-5xl mx-auto px-4 h-16 flex items-center justify-between">
             <div class="flex items-center gap-3">
-                <div class="w-8 h-8 text-primary">
-                    <svg viewBox="0 0 512 512" fill="none" xmlns="http://www.w3.org/2000/svg">
-                        <g stroke="currentColor" stroke-width="40" stroke-linecap="round">
-                            <path d="M120 256C120 180.89 180.89 120 256 120C300 120 338 140 365 172"/>
-                            <path d="M392 256C392 331.11 331.11 392 256 392C212 392 174 372 147 340"/>
-                            <path d="M185 256C185 216.79 216.79 185 256 185C280 185 302 198 315 218"/>
-                            <path d="M327 256C327 295.21 295.21 327 256 327C232 327 210 314 197 294"/>
-                            <circle cx="256" cy="256" r="20" fill="currentColor" stroke="none"/>
-                        </g>
-                    </svg>
-                </div>
+                <div class="w-8 h-8 text-primary icon-container" data-icon="logo-outline"></div>
                 <span class="font-bold text-xl tracking-tight">DownOnly</span>
             </div>
             <div class="flex items-center gap-1">
                 <button onclick="toggleTheme()" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-500 hover:text-yellow-500">
-                    <span class="dark:hidden"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M8 12a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"/><path d="M3 12h1m8 -9v1m8 8h1m-9 8v1m-6.4 -15.4l.7 .7m12.1 -.7l-.7 .7m0 11.4l.7 .7m-12.1 -.7l-.7 .7"/></svg></span>
-                    <span class="hidden dark:block"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M12 3c.132 0 .263 0 .393 0a7.5 7.5 0 0 0 7.92 12.446a9 9 0 1 1 -8.313 -12.454l0 .008"/></svg></span>
+                    <span class="dark:hidden icon-container" data-icon="sun"></span>
+                    <span class="hidden dark:block icon-container" data-icon="moon"></span>
                 </button>
                 <button onclick="toggleModal('log-modal')" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-500 hover:text-slate-800 dark:text-slate-400 dark:hover:text-white">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M5 7l5 5l-5 5"/><path d="M12 19l7 0"/></svg>
+                    <span class="icon-container" data-icon="terminal"></span>
+                </button>
+                <button onclick="toggleModal('urls-modal')" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-500 hover:text-primary dark:text-slate-400 dark:hover:text-primary">
+                    <span class="icon-container" data-icon="list"></span>
                 </button>
                 <button onclick="toggleModal('config-modal')" class="p-2 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-slate-500 hover:text-primary dark:text-slate-400 dark:hover:text-primary">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065"/><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"/></svg>
+                    <span class="icon-container" data-icon="settings"></span>
                 </button>
             </div>
         </div>
@@ -72,10 +74,9 @@
                     <div class="font-mono text-xl font-bold text-primary" id="uptime-display">00:00:00</div>
                 </div>
                 <button onclick="toggleService()" id="power-btn" class="absolute bottom-6 right-6 w-14 h-14 bg-primary hover:bg-blue-600 text-white rounded-2xl flex items-center justify-center transition-all active:scale-95 shadow-lg shadow-blue-500/20 z-20">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M6 4v16a1 1 0 0 0 1.524 .852l13 -8a1 1 0 0 0 0 -1.704l-13 -8a1 1 0 0 0 -1.524 .852z"/></svg>
+                    <span class="icon-container" data-icon="play"></span>
                 </button>
-                <div class="absolute -right-2 -top-2 opacity-[0.05] dark:opacity-[0.1] text-slate-500 transform rotate-12 pointer-events-none">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="120" height="120" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"/><path d="M7 11l5 5l5 -5"/><path d="M12 4l0 12"/></svg>
+                <div class="absolute -right-2 -top-2 opacity-[0.05] dark:opacity-[0.1] text-slate-500 transform rotate-12 pointer-events-none icon-container" data-icon="download">
                 </div>
             </div>
             <div class="md:col-span-2 bg-white dark:bg-cardDark p-6 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-sm flex flex-col justify-between h-48">
@@ -109,11 +110,11 @@
                 </div>
                 <div class="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-1 rounded-xl mt-1">
                     <button onclick="changeMonth(-1)" class="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white dark:hover:bg-slate-700 text-slate-400 transition-all shadow-sm">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M15 6l-6 6l6 6"/></svg>
+                        <span class="icon-container" data-icon="chevron-left"></span>
                     </button>
                     <span class="text-xs font-bold px-2 text-center min-w-[3em]" id="month-display">--</span>
                     <button onclick="changeMonth(1)" class="w-7 h-7 rounded-lg flex items-center justify-center hover:bg-white dark:hover:bg-slate-700 text-slate-400 transition-all shadow-sm">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M9 6l6 6l-6 6"/></svg>
+                        <span class="icon-container" data-icon="chevron-right"></span>
                     </button>
                 </div>
             </div>
@@ -132,12 +133,36 @@
                         <option>--</option>
                     </select>
                     <button onclick="toggleModal('log-modal')" class="text-slate-400 hover:text-slate-600 dark:hover:text-white">
-                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M18 6l-12 12"/><path d="M6 6l12 12"/></svg>
+                        <span class="icon-container" data-icon="close"></span>
                     </button>
                 </div>
             </div>
             <div class="flex-1 p-6 overflow-y-auto font-mono text-xs space-y-1 no-scrollbar" id="console-logs">
                 <div class="text-slate-300 dark:text-slate-600 text-center py-8">等待连接后端...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 地址管理弹窗 -->
+    <div id="urls-modal" class="fixed inset-0 z-50 hidden flex items-center justify-center p-4 modal-blur">
+        <div class="absolute inset-0 bg-slate-900/60 transition-opacity" onclick="toggleModal('urls-modal')"></div>
+        <div class="relative w-full max-w-md bg-white dark:bg-cardDark rounded-3xl border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden transform transition-all scale-95 opacity-0 modal-content max-h-[80vh] flex flex-col">
+            <div class="flex justify-between items-center p-6 border-b border-slate-100 dark:border-slate-800 sticky top-0 bg-white dark:bg-cardDark z-10">
+                <h3 class="font-bold text-lg">地址管理</h3>
+                <button onclick="toggleModal('urls-modal')" class="text-slate-400 hover:text-slate-600 dark:hover:text-white">
+                    <span class="icon-container" data-icon="close"></span>
+                </button>
+            </div>
+            <div class="flex-1 overflow-y-auto p-4 space-y-1 no-scrollbar min-h-[180px]" id="urls-list">
+                <!-- URL rows rendered by JS -->
+            </div>
+            <div class="p-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 flex justify-between items-center gap-3">
+                <button onclick="batchTestUrls()" class="flex-1 py-3 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]">
+                    批量测试
+                </button>
+                <button onclick="addUrl()" class="flex-1 py-3 bg-primary hover:bg-blue-600 text-white rounded-2xl text-sm font-bold shadow-lg shadow-blue-500/20 transition-all active:scale-[0.98]">
+                    添加地址
+                </button>
             </div>
         </div>
     </div>
@@ -149,7 +174,7 @@
             <div class="flex justify-between items-center p-6 border-b border-slate-100 dark:border-slate-800 sticky top-0 bg-white dark:bg-cardDark z-10">
                 <h3 class="font-bold text-lg">策略配置</h3>
                 <button onclick="toggleModal('config-modal')" class="text-slate-400 hover:text-slate-600 dark:hover:text-white">
-                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M18 6l-12 12"/><path d="M6 6l12 12"/></svg>
+                    <span class="icon-container" data-icon="close"></span>
                 </button>
             </div>
             <div class="p-6 space-y-6">
@@ -200,8 +225,24 @@
                     </div>
                 </div>
                 <div>
-                    <label class="block text-[11px] font-bold text-slate-400 uppercase mb-2 px-1">资源地址（每行一个）</label>
-                    <textarea id="conf-urls" class="w-full h-28 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-4 text-xs font-mono leading-relaxed resize-none focus:ring-1 focus:ring-primary focus:border-primary outline-none" placeholder="每行填入一个下载直链..."></textarea>
+                    <div class="flex justify-between items-center px-1">
+                        <span class="text-[11px] font-bold text-slate-400 uppercase">禁用休息间隔</span>
+                        <button id="conf-sleep-disabled" onclick="toggleSleepDisabled(this)" data-on="false" class="relative p-0 border-0 bg-transparent cursor-pointer leading-none">
+                            <div class="toggle-bg w-10 h-[22px] rounded-full bg-slate-200 dark:bg-slate-700 transition-colors"></div>
+                            <div class="toggle-dot absolute left-0.5 top-0.5 w-[18px] h-[18px] bg-white rounded-full shadow transform transition-transform"></div>
+                        </button>
+                    </div>
+                    <p class="text-[10px] text-slate-300 dark:text-slate-600 px-1 mt-1">下载完成后直接开始下一轮，不等待休息</p>
+                </div>
+                <div>
+                    <div class="flex justify-between items-center px-1">
+                        <span class="text-[11px] font-bold text-slate-400 uppercase">允许公网访问</span>
+                        <button id="conf-allow-public" onclick="this.dataset.on=this.dataset.on==='true'?'false':'true'; this.querySelector('.toggle-dot').classList.toggle('translate-x-[18px]'); this.querySelector('.toggle-bg').classList.toggle('bg-primary'); this.querySelector('.toggle-bg').classList.toggle('bg-slate-200'); this.querySelector('.toggle-bg').classList.toggle('dark:bg-slate-700')" data-on="false" class="relative p-0 border-0 bg-transparent cursor-pointer leading-none">
+                            <div class="toggle-bg w-10 h-[22px] rounded-full bg-slate-200 dark:bg-slate-700 transition-colors"></div>
+                            <div class="toggle-dot absolute left-0.5 top-0.5 w-[18px] h-[18px] bg-white rounded-full shadow transform transition-transform"></div>
+                        </button>
+                    </div>
+                    <p class="text-[10px] text-slate-300 dark:text-slate-600 px-1 mt-1">开启后将允许公网设备访问本服务</p>
                 </div>
             </div>
             <div class="p-6 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
@@ -213,8 +254,9 @@
     </div>
 
     <script>
-        const SVG_PLAY = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M6 4v16a1 1 0 0 0 1.524 .852l13 -8a1 1 0 0 0 0 -1.704l-13 -8a1 1 0 0 0 -1.524 .852z"/></svg>';
-        const SVG_STOP = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M17 4h-10a3 3 0 0 0 -3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3 -3v-10a3 3 0 0 0 -3 -3z"/></svg>';
+        const ICON_CACHE = {};
+        let SVG_PLAY = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M6 4v16a1 1 0 0 0 1.524 .852l13 -8a1 1 0 0 0 0 -1.704l-13 -8a1 1 0 0 0 -1.524 .852z"/></svg>';
+        let SVG_STOP = '<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="currentColor"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M17 4h-10a3 3 0 0 0 -3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3 -3v-10a3 3 0 0 0 -3 -3z"/></svg>';
         const MONTH_NAMES = ['一月','二月','三月','四月','五月','六月','七月','八月','九月','十月','十一月','十二月'];
         const STATUS_MAP = {
             running:         { text: '运行中',   txtCls: 'text-2xl font-bold text-emerald-500', dotCls: 'w-2 h-2 rounded-full bg-emerald-500 animate-pulse mt-0.5', active: true },
@@ -225,6 +267,7 @@
         };
 
         let liveChart, historyChart, currentMonth = new Date().getMonth() + 1, logRefreshTimer = null;
+        let currentUrls = [], urlTestStatus = {};
 
         function formatTraffic(bytes) {
             if (bytes >= 1e12) return { val: (bytes / 1e12).toFixed(2), unit: 'TB' };
@@ -233,7 +276,9 @@
             return { val: '0.00', unit: 'GB' };
         }
         function padTime(n) { return String(n).padStart(2, '0'); }
-        function todayStr() { return new Date().toISOString().slice(0, 10); }
+        function todayStr() { var d = new Date(); return d.getFullYear() + '-' + padTime(d.getMonth()+1) + '-' + padTime(d.getDate()); }
+
+        // ── 图表 ──
 
         function initCharts() {
             const isDark = document.documentElement.classList.contains('dark');
@@ -249,6 +294,8 @@
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => ctx.parsed.y.toFixed(1) + ' GB' } } }, scales: { x: { grid: { display: false }, ticks: { color: cT, font: { size: 9, family: 'monospace' } } }, y: { border: { display: false }, grid: { color: cG }, ticks: { color: cT, font: { size: 9 }, callback: v => v + ' GB' } } } }
             });
         }
+
+        // ── 状态轮询与服务控制 ──
 
         async function pollStatus() {
             try {
@@ -272,6 +319,8 @@
 
         async function toggleService() { try { await fetch('/api/toggle', { method: 'POST' }); } catch(e) {} }
 
+        // ── 历史流量 ──
+
         async function loadHistory(month) {
             document.getElementById('month-display').innerText = MONTH_NAMES[month - 1];
             try {
@@ -291,6 +340,8 @@
             if (next < 1 || next > new Date().getMonth() + 1) return;
             currentMonth = next; loadHistory(currentMonth);
         }
+
+        // ── 日志管理 ──
 
         async function loadLogDates() {
             try {
@@ -314,14 +365,14 @@
                 const d = await res.json();
                 const box = document.getElementById('console-logs');
 
-                // 刷新前记住滚动状态
+                // 保留滚动位置
                 var wasAtBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 50;
                 var oldScrollTop = box.scrollTop;
 
-                // 刷新前记住哪些行是展开的
+                // 记录已展开行（以文本内容为键，避免索引错位）
                 var expandedSet = new Set();
                 box.querySelectorAll('.log-line.expanded').forEach(function(el) {
-                    expandedSet.add(el.dataset.idx);
+                    expandedSet.add(el.textContent);
                 });
 
                 box.innerHTML = '';
@@ -330,7 +381,8 @@
                     return;
                 }
                 d.entries.forEach(function(e, i) {
-                    var isExpanded = expandedSet.has(String(i));
+                    var fullText = '[' + e.time + '] ' + e.msg;
+                    var isExpanded = expandedSet.has(fullText);
                     var div = document.createElement('div');
                     div.className = 'log-line py-0.5 hover:bg-slate-50 dark:hover:bg-slate-900/50 rounded px-1 -mx-1 transition-colors cursor-pointer select-none active:opacity-70' + (isExpanded ? ' expanded' : ' truncate');
                     div.dataset.idx = i;
@@ -347,7 +399,7 @@
                     box.appendChild(div);
                 });
 
-                // 在底部 → 跟随新日志；在上面翻看 → 保持原位
+                // 底部跟随滚动，上方保持原位
                 if (wasAtBottom) {
                     box.scrollTop = box.scrollHeight;
                 } else {
@@ -355,6 +407,33 @@
                 }
             } catch(e) {}
         }
+
+        // ── Toast 提示 ──
+
+        function showToast(msg) {
+            var c = document.getElementById('toast-container');
+            var t = document.createElement('div');
+            t.className = 'toast'; t.textContent = msg;
+            c.appendChild(t);
+            requestAnimationFrame(function() { t.classList.add('show'); });
+            setTimeout(function() { t.classList.remove('show'); setTimeout(function() { t.remove(); }, 300); }, 3000);
+        }
+
+        // ── 配置管理 ──
+
+        function toggleSleepDisabled(btn) {
+            var on = btn.dataset.on === 'true';
+            btn.dataset.on = on ? 'false' : 'true';
+            btn.querySelector('.toggle-dot').classList.toggle('translate-x-[18px]');
+            btn.querySelector('.toggle-bg').classList.toggle('bg-primary');
+            btn.querySelector('.toggle-bg').classList.toggle('bg-slate-200');
+            btn.querySelector('.toggle-bg').classList.toggle('dark:bg-slate-700');
+            var disabled = btn.dataset.on === 'true';
+            document.getElementById('conf-sleep-min').disabled = disabled;
+            document.getElementById('conf-sleep-max').disabled = disabled;
+        }
+
+        function clearInputError(el) { el.classList.remove('border-red-500', 'dark:border-red-500'); }
 
         async function loadConfig() {
             try {
@@ -368,23 +447,97 @@
                 document.getElementById('conf-end').value = c.schedule_end;
                 document.getElementById('conf-sleep-min').value = c.sleep_min_minutes;
                 document.getElementById('conf-sleep-max').value = c.sleep_max_minutes;
-                document.getElementById('conf-urls').value = (c.urls || []).join('\n');
+                currentUrls = (c.urls || []).slice();
+                // 同步"禁用休息"开关状态
+                var sdBtn = document.getElementById('conf-sleep-disabled');
+                var sdOn = c.sleep_disabled === true;
+                sdBtn.dataset.on = sdOn ? 'true' : 'false';
+                var sdDot = sdBtn.querySelector('.toggle-dot');
+                var sdBg = sdBtn.querySelector('.toggle-bg');
+                if (sdOn) { sdDot.classList.add('translate-x-[18px]'); sdBg.classList.add('bg-primary'); sdBg.classList.remove('bg-slate-200','dark:bg-slate-700'); }
+                else { sdDot.classList.remove('translate-x-[18px]'); sdBg.classList.remove('bg-primary'); sdBg.classList.add('bg-slate-200','dark:bg-slate-700'); }
+                document.getElementById('conf-sleep-min').disabled = sdOn;
+                document.getElementById('conf-sleep-max').disabled = sdOn;
+                // 同步"公网访问"开关状态
+                var bpBtn = document.getElementById('conf-allow-public');
+                var bpOn = c.allow_public_access === true;
+                bpBtn.dataset.on = bpOn ? 'true' : 'false';
+                var dot = bpBtn.querySelector('.toggle-dot');
+                var bg = bpBtn.querySelector('.toggle-bg');
+                if (bpOn) { dot.classList.add('translate-x-[18px]'); bg.classList.add('bg-primary'); bg.classList.remove('bg-slate-200','dark:bg-slate-700'); }
+                else { dot.classList.remove('translate-x-[18px]'); bg.classList.remove('bg-primary'); bg.classList.add('bg-slate-200','dark:bg-slate-700'); }
             } catch(e) {}
         }
 
         async function saveConfig() {
-            const cfg = {
-                speed_limit_mbps: parseInt(document.getElementById('conf-speed').innerText) || 5,
-                daily_quota_min_gb: parseInt(document.getElementById('conf-quota-min').value) || 150,
-                daily_quota_max_gb: parseInt(document.getElementById('conf-quota-max').value) || 200,
-                schedule_start: document.getElementById('conf-start').value || '00:00',
-                schedule_end: document.getElementById('conf-end').value || '23:59',
-                sleep_min_minutes: parseInt(document.getElementById('conf-sleep-min').value) || 10,
-                sleep_max_minutes: parseInt(document.getElementById('conf-sleep-max').value) || 20,
-                urls: document.getElementById('conf-urls').value.split('\n').map(s => s.trim()).filter(Boolean)
+            // 清除旧的错误样式
+            ['conf-quota-min','conf-quota-max','conf-start','conf-end','conf-sleep-min','conf-sleep-max'].forEach(function(id) {
+                clearInputError(document.getElementById(id));
+            });
+
+            var speedMbps = parseInt(document.getElementById('conf-speed').innerText) || 5;
+            var quotaMin = parseInt(document.getElementById('conf-quota-min').value);
+            var quotaMax = parseInt(document.getElementById('conf-quota-max').value);
+            var scheduleStart = document.getElementById('conf-start').value || '00:00';
+            var scheduleEnd = document.getElementById('conf-end').value || '23:59';
+            var sleepMin = parseInt(document.getElementById('conf-sleep-min').value);
+            var sleepMax = parseInt(document.getElementById('conf-sleep-max').value);
+            var sleepDisabled = document.getElementById('conf-sleep-disabled').dataset.on === 'true';
+
+            // 前端校验
+            if (isNaN(quotaMin) || quotaMin < 1 || quotaMin > 99999) {
+                document.getElementById('conf-quota-min').classList.add('border-red-500','dark:border-red-500');
+                showToast('每日限额最小值须在 1~99999 GB 之间'); return;
+            }
+            if (isNaN(quotaMax) || quotaMax < quotaMin || quotaMax > 99999) {
+                document.getElementById('conf-quota-max').classList.add('border-red-500','dark:border-red-500');
+                showToast('每日限额最大值须大于等于最小值且不超过 99999 GB'); return;
+            }
+            if (!/^\d{2}:\d{2}$/.test(scheduleStart) || parseInt(scheduleStart.slice(0,2)) > 23 || parseInt(scheduleStart.slice(3)) > 59) {
+                document.getElementById('conf-start').classList.add('border-red-500','dark:border-red-500');
+                showToast('运行开始时间格式不正确'); return;
+            }
+            if (!/^\d{2}:\d{2}$/.test(scheduleEnd) || parseInt(scheduleEnd.slice(0,2)) > 23 || parseInt(scheduleEnd.slice(3)) > 59) {
+                document.getElementById('conf-end').classList.add('border-red-500','dark:border-red-500');
+                showToast('运行结束时间格式不正确'); return;
+            }
+            if (scheduleStart === scheduleEnd) {
+                document.getElementById('conf-start').classList.add('border-red-500','dark:border-red-500');
+                document.getElementById('conf-end').classList.add('border-red-500','dark:border-red-500');
+                showToast('运行开始时间与结束时间不能相同'); return;
+            }
+            if (!sleepDisabled) {
+                if (isNaN(sleepMin) || sleepMin < 0 || sleepMin > 1440) {
+                    document.getElementById('conf-sleep-min').classList.add('border-red-500','dark:border-red-500');
+                    showToast('休息间隔最小值须在 0~1440 分钟之间'); return;
+                }
+                if (isNaN(sleepMax) || sleepMax < sleepMin || sleepMax > 1440) {
+                    document.getElementById('conf-sleep-max').classList.add('border-red-500','dark:border-red-500');
+                    showToast('休息间隔最大值须大于等于最小值且不超过 1440 分钟'); return;
+                }
+            }
+
+            var cfg = {
+                speed_limit_mbps: speedMbps,
+                daily_quota_min_gb: quotaMin,
+                daily_quota_max_gb: quotaMax,
+                schedule_start: scheduleStart,
+                schedule_end: scheduleEnd,
+                sleep_min_minutes: sleepMin || 10,
+                sleep_max_minutes: sleepMax || 20,
+                sleep_disabled: sleepDisabled,
+                urls: currentUrls,
+                allow_public_access: document.getElementById('conf-allow-public').dataset.on === 'true'
             };
-            try { await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) }); toggleModal('config-modal'); } catch(e) {}
+            try {
+                var res = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+                var data = await res.json();
+                if (data.ok) { toggleModal('config-modal'); }
+                else { showToast(data.error || '保存失败'); }
+            } catch(e) { showToast('网络错误，请重试'); }
         }
+
+        // ── 弹窗控制 ──
 
         function toggleModal(id) {
             const modal = document.getElementById(id);
@@ -399,6 +552,7 @@
                     }, 3000);
                 }
                 if (id === 'config-modal') loadConfig();
+                if (id === 'urls-modal') loadUrls();
                 modal.classList.remove('hidden');
                 setTimeout(() => { content.classList.remove('scale-95','opacity-0'); content.classList.add('scale-100','opacity-100'); }, 10);
             } else {
@@ -408,13 +562,143 @@
             }
         }
 
+        // ── 主题切换 ──
+
         function toggleTheme() {
             document.documentElement.classList.toggle('dark');
             localStorage.setItem('downonly-theme', document.documentElement.classList.contains('dark') ? 'dark' : 'light');
             initCharts(); loadHistory(currentMonth);
         }
 
-        window.onload = () => { initCharts(); loadHistory(currentMonth); pollStatus(); setInterval(pollStatus, 1000); };
+        // ── SVG 图标 ──
+
+        async function loadIcon(name) {
+            if (ICON_CACHE[name]) return ICON_CACHE[name];
+            try {
+                const res = await fetch('icons/' + name + '.svg');
+                if (res.ok) { ICON_CACHE[name] = await res.text(); return ICON_CACHE[name]; }
+            } catch(e) {}
+            return null;
+        }
+
+        async function initIcons() {
+            const names = [...new Set([...document.querySelectorAll('[data-icon]')].map(el => el.dataset.icon))];
+            const extras = ['play', 'stop'];
+            extras.forEach(n => { if (!names.includes(n)) names.push(n); });
+            await Promise.all(names.map(async name => {
+                const svg = await loadIcon(name);
+                if (svg) document.querySelectorAll('[data-icon="' + name + '"]').forEach(el => { el.innerHTML = svg; });
+            }));
+            if (ICON_CACHE.play) SVG_PLAY = ICON_CACHE.play;
+            if (ICON_CACHE.stop) SVG_STOP = ICON_CACHE.stop;
+        }
+
+        // ── 地址管理 ──
+
+        function renderUrlList() {
+            var box = document.getElementById('urls-list');
+            box.innerHTML = '';
+            if (currentUrls.length === 0) {
+                box.innerHTML = '<div class="text-slate-300 dark:text-slate-600 text-center py-12 text-sm">暂无资源地址，点击下方"添加地址"</div>';
+                return;
+            }
+            currentUrls.forEach(function(url, i) {
+                var row = document.createElement('div');
+                row.className = 'flex items-center gap-2 py-1.5 px-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group';
+                row.dataset.idx = i;
+                var status = urlTestStatus[url];
+                var dotColor = status === 'ok' ? 'bg-emerald-500' : status === 'fail' ? 'bg-red-500' : status === 'testing' ? 'bg-blue-400 animate-pulse' : 'bg-slate-300';
+                row.innerHTML = '<div class="w-2 h-2 rounded-full ' + dotColor + ' shrink-0 url-dot"></div>'
+                    + '<span class="flex-1 text-sm font-mono truncate text-slate-600 dark:text-slate-300" title="' + url.replace(/"/g, '&quot;') + '">' + url.replace(/</g, '&lt;') + '</span>'
+                    + '<span class="flex items-center shrink-0 gap-0.5">'
+                    + '<button onclick="removeUrl(' + i + ')" class="flex items-center justify-center w-6 h-6 rounded text-slate-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors" title="删除">'
+                    + '<span class="icon-container" style="width:18px;height:18px" data-icon="trash"></span></button>'
+                    + '<button onclick="testUrl(' + i + ')" class="flex items-center justify-center w-6 h-6 rounded text-slate-300 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors" title="测试">'
+                    + '<span class="icon-container" style="width:18px;height:18px" data-icon="link"></span></button>'
+                    + '</span>';
+                box.appendChild(row);
+            });
+            initIcons().then(function() {
+                box.querySelectorAll('.icon-container svg').forEach(function(svg) {
+                    svg.removeAttribute('width');
+                    svg.removeAttribute('height');
+                    svg.style.width = '18px';
+                    svg.style.height = '18px';
+                });
+            });
+        }
+
+        function addUrl() {
+            var box = document.getElementById('urls-list');
+            var placeholder = box.querySelector('.text-center');
+            if (placeholder) placeholder.remove();
+            var row = document.createElement('div');
+            row.className = 'flex items-center gap-3 py-1.5 px-3 rounded-lg transition-colors';
+            row.innerHTML = '<div class="w-2 h-2 rounded-full bg-slate-300 shrink-0"></div>'
+                + '<input type="text" class="flex-1 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg px-3 py-1.5 text-sm font-mono focus:ring-1 focus:ring-primary focus:border-primary outline-none" placeholder="输入下载直链...">'
+                + '<button onclick="this.parentElement.remove()" class="p-1.5 rounded-lg text-slate-300 hover:text-red-500 transition-colors shrink-0"><span class="icon-container" data-icon="close"></span></button>';
+            box.appendChild(row);
+            initIcons();
+            var input = row.querySelector('input');
+            input.focus();
+            input.addEventListener('keydown', function(e) {
+                if (e.key === 'Enter') { input.blur(); }
+            });
+            input.addEventListener('blur', function() {
+                var val = input.value.trim();
+                if (val) {
+                    currentUrls.push(val);
+                    urlTestStatus[val] = undefined;
+                    renderUrlList();
+                } else {
+                    row.remove();
+                    if (currentUrls.length === 0) renderUrlList();
+                }
+            });
+        }
+
+        function removeUrl(idx) {
+            currentUrls.splice(idx, 1);
+            renderUrlList();
+        }
+
+        async function testUrl(idx) {
+            var url = currentUrls[idx];
+            if (!url) return;
+            urlTestStatus[url] = 'testing';
+            renderUrlList();
+            try {
+                var ctrl = new AbortController();
+                var timer = setTimeout(function() { ctrl.abort(); }, 10000);
+                var res = await fetch('/api/test_url?url=' + encodeURIComponent(url), { signal: ctrl.signal });
+                clearTimeout(timer);
+                var data = await res.json();
+                urlTestStatus[url] = data.ok ? 'ok' : 'fail';
+            } catch(e) {
+                urlTestStatus[url] = 'fail';
+            }
+            renderUrlList();
+        }
+
+        async function batchTestUrls() {
+            for (var i = 0; i < currentUrls.length; i++) {
+                await testUrl(i);
+            }
+        }
+
+        async function loadUrls() {
+            try {
+                var res = await fetch('/api/config'); if (!res.ok) return;
+                var c = await res.json();
+                currentUrls = (c.urls || []).slice();
+                urlTestStatus = {};
+                renderUrlList();
+            } catch(e) {}
+        }
+
+        // ── 初始化 ──
+
+        window.onload = () => { initIcons(); initCharts(); loadHistory(currentMonth); pollStatus(); setInterval(pollStatus, 1000); };
     </script>
 </body>
 </html>
