@@ -27,19 +27,19 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME}
           # x86_64
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "downonly-linux-amd64-${VERSION}" main.go
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "downonly-linux-amd64-${VERSION}" .
           # ARM64
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o "downonly-linux-arm64-${VERSION}" main.go
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o "downonly-linux-arm64-${VERSION}" .
           # ARMv7
-          GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o "downonly-linux-armv7-${VERSION}" main.go
+          GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o "downonly-linux-armv7-${VERSION}" .
           # ARMv6
-          GOOS=linux GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o "downonly-linux-armv6-${VERSION}" main.go
+          GOOS=linux GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o "downonly-linux-armv6-${VERSION}" .
           # MIPS
-          GOOS=linux GOARCH=mips GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips-${VERSION}" main.go
-          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mipsle-${VERSION}" main.go
+          GOOS=linux GOARCH=mips GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips-${VERSION}" .
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mipsle-${VERSION}" .
           # MIPS64
-          GOOS=linux GOARCH=mips64 GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips64-${VERSION}" main.go
-          GOOS=linux GOARCH=mips64le GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips64le-${VERSION}" main.go
+          GOOS=linux GOARCH=mips64 GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips64-${VERSION}" .
+          GOOS=linux GOARCH=mips64le GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips64le-${VERSION}" .
 
       # 2. 构建 deb 包
       - name: Build deb packages
