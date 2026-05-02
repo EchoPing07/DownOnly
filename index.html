@@ -650,6 +650,7 @@
                     currentUrls.push(val);
                     urlTestStatus[val] = undefined;
                     renderUrlList();
+                    saveUrlsToServer();
                 } else {
                     row.remove();
                     if (currentUrls.length === 0) renderUrlList();
@@ -660,6 +661,21 @@
         function removeUrl(idx) {
             currentUrls.splice(idx, 1);
             renderUrlList();
+            saveUrlsToServer();
+        }
+
+        var _saveUrlsTimer = null;
+        function saveUrlsToServer() {
+            clearTimeout(_saveUrlsTimer);
+            _saveUrlsTimer = setTimeout(async function() {
+                try {
+                    var res = await fetch('/api/config');
+                    if (!res.ok) return;
+                    var cfg = await res.json();
+                    cfg.urls = currentUrls.slice();
+                    await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+                } catch(e) {}
+            }, 300);
         }
 
         async function testUrl(idx) {

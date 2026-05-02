@@ -625,7 +625,7 @@ func (app *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"entries": entries})
 }
 
-// handleTestURL 探测指定 URL 的可达性（HEAD 请求）
+// handleTestURL 探测指定 URL 的可达性（GET + Range 只取 1 字节）
 func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
 	rawURL := r.URL.Query().Get("url")
 	if rawURL == "" || !isAllowedURL(rawURL) {
@@ -634,18 +634,21 @@ func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequest("HEAD", rawURL, nil)
+	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
 		return
 	}
+	req.Header.Set("Range", "bytes=0-0")
+	req.Header.Set("User-Agent", userAgents[rand.Intn(len(userAgents))])
 	resp, err := client.Do(req)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
 		return
 	}
+	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"ok": resp.StatusCode >= 200 && resp.StatusCode < 400})
