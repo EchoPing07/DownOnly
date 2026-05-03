@@ -13,8 +13,7 @@ WORKDIR /app
 # 设置中国时区
 RUN apk add --no-cache tzdata \
     && cp /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
-    && echo "Asia/Shanghai" > /etc/timezone \
-    && apk del tzdata
+    && echo "Asia/Shanghai" > /etc/timezone
 ENV TZ=Asia/Shanghai
 
 # 复制编译好的二进制文件
