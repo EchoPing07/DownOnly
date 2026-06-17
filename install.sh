@@ -41,8 +41,10 @@ echo ""
 echo -e "${B}[1/9]${W} 检测系统架构..."
 ARCH=$(uname -m)
 case $ARCH in
-    x86_64) GOARCH="amd64" ;;
-    aarch64) GOARCH="arm64" ;;
+    x86_64)         GOARCH="amd64" ;;
+    aarch64)        GOARCH="arm64" ;;
+    armv7l)         GOARCH="armv7" ;;
+    armv6l)         GOARCH="armv6" ;;
     *)
         echo -e "${R}不支持的架构: $ARCH${W}"
         exit 1
@@ -61,29 +63,33 @@ echo -e "      版本: ${G}${LATEST}${W}"
 
 # ========== 尝试下载预编译文件 ==========
 echo -e "${B}[3/9]${W} 尝试下载预编译文件..."
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/downonly-linux-${GOARCH}-${LATEST}"
+TARBALL="downonly_linux_${GOARCH}_${LATEST}.tar.gz"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${TARBALL}"
 
 mkdir -p "${APP_DIR}/data"
 cd "${APP_DIR}"
 
-if wget -q --show-progress -O downonly "$DOWNLOAD_URL" 2>&1; then
+    if wget -q --show-progress -O "${TARBALL}" "$DOWNLOAD_URL" 2>&1; then
     echo -e "${G}      下载成功${W}"
-    # SHA256 校验（如果存在校验文件）
-    SHA256_URL="${DOWNLOAD_URL}.sha256"
-    if wget -q -O downonly.sha256 "$SHA256_URL" 2>/dev/null; then
-        EXPECTED=$(awk '{print $1}' downonly.sha256)
-        ACTUAL=$(sha256sum downonly | awk '{print $1}')
-        if [ "$EXPECTED" = "$ACTUAL" ]; then
+    # SHA256 校验：下载 checksums 文件并比对（sha256sum 输出格式为 "<hash>  <file>"）
+    CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${LATEST}/checksums_${LATEST}.txt"
+    if wget -q -O checksums.txt "$CHECKSUMS_URL" 2>/dev/null; then
+        EXPECTED=$(awk -v f="${TARBALL}" '$NF==f {print $1}' checksums.txt)
+        ACTUAL=$(sha256sum "${TARBALL}" | awk '{print $1}')
+        if [ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ]; then
             echo -e "${G}      SHA256 校验通过${W}"
         else
             echo -e "${R}      SHA256 校验失败，文件可能被篡改${W}"
-            rm -f downonly downonly.sha256
+            rm -f "${TARBALL}" checksums.txt
             exit 1
         fi
-        rm -f downonly.sha256
+        rm -f checksums.txt
     else
         echo -e "${Y}      未找到校验文件，跳过校验${W}"
     fi
+    # 解压 tar.gz 并统一重命名为 downonly
+    tar -xzf "${TARBALL}"
+    rm -f "${TARBALL}"
     chmod +x downonly
 else
     echo -e "${Y}      预编译文件不存在，准备本地编译...${W}"
@@ -158,8 +164,10 @@ Y='\033[0;33m'
 
 get_arch() {
     case $(uname -m) in
-        x86_64) echo "amd64" ;;
-        aarch64) echo "arm64" ;;
+        x86_64)   echo "amd64" ;;
+        aarch64)  echo "arm64" ;;
+        armv7l)   echo "armv7" ;;
+        armv6l)   echo "armv6" ;;
         *) echo "unknown" ;;
     esac
 }
@@ -214,33 +222,36 @@ do_update() {
         return 1
     fi
     
-    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/downonly-linux-${ARCH}-${LATEST}"
-    
+    TARBALL="downonly_linux_${ARCH}_${LATEST}.tar.gz"
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST}/${TARBALL}"
+
     echo -e " 正在下载..."
     systemctl stop $SERVICE
-    
-    if wget -q --show-progress -O "${APP_DIR}/downonly.new" "$DOWNLOAD_URL"; then
-        # SHA256 校验（如果存在）
-        SHA256_URL="${DOWNLOAD_URL}.sha256"
-        if wget -q -O "${APP_DIR}/downonly.new.sha256" "$SHA256_URL" 2>/dev/null; then
-            EXPECTED=$(awk '{print $1}' "${APP_DIR}/downonly.new.sha256")
-            ACTUAL=$(sha256sum "${APP_DIR}/downonly.new" | awk '{print $1}')
-            if [ "$EXPECTED" != "$ACTUAL" ]; then
+
+    if wget -q --show-progress -O "${APP_DIR}/${TARBALL}" "$DOWNLOAD_URL"; then
+        # SHA256 校验：下载 checksums 文件并比对（sha256sum 输出格式为 "<hash>  <file>"）
+        CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${LATEST}/checksums_${LATEST}.txt"
+        if wget -q -O "${APP_DIR}/checksums.txt" "$CHECKSUMS_URL" 2>/dev/null; then
+            EXPECTED=$(awk -v f="${TARBALL}" '$NF==f {print $1}' "${APP_DIR}/checksums.txt")
+            ACTUAL=$(sha256sum "${APP_DIR}/${TARBALL}" | awk '{print $1}')
+            if [ -z "$EXPECTED" ] || [ "$EXPECTED" != "$ACTUAL" ]; then
                 echo -e "${R} SHA256 校验失败${W}"
-                rm -f "${APP_DIR}/downonly.new" "${APP_DIR}/downonly.new.sha256"
+                rm -f "${APP_DIR}/${TARBALL}" "${APP_DIR}/checksums.txt"
                 systemctl start $SERVICE
                 sleep 2
                 return 1
             fi
-            rm -f "${APP_DIR}/downonly.new.sha256"
+            rm -f "${APP_DIR}/checksums.txt"
         fi
-        chmod +x "${APP_DIR}/downonly.new"
-        mv "${APP_DIR}/downonly.new" "${APP_DIR}/downonly"
+        # 解压并替换为新版本
+        tar -xzf "${APP_DIR}/${TARBALL}" -C "${APP_DIR}"
+        rm -f "${APP_DIR}/${TARBALL}"
+        chmod +x "${APP_DIR}/downonly"
         systemctl start $SERVICE
         echo -e "${G} 更新成功！${W}"
     else
         echo -e "${R} 下载失败，尝试回滚...${W}"
-        rm -f "${APP_DIR}/downonly.new"
+        rm -f "${APP_DIR}/${TARBALL}"
         if [ -f "${APP_DIR}/downonly" ] && [ -x "${APP_DIR}/downonly" ]; then
             systemctl start $SERVICE
             echo -e "${Y} 已回滚到旧版本并重启服务${W}"

@@ -22,26 +22,37 @@ jobs:
           go-version: '1.22'
           cache: false
 
-      # 1. 编译二进制文件
+      # 1. 编译二进制文件（文件名统一用下划线 _）
       - name: Build binaries
         run: |
           VERSION=${GITHUB_REF_NAME}
           # x86_64
-          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "downonly-linux-amd64-${VERSION}" .
+          GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "downonly_linux_amd64_${VERSION}" .
           # ARM64
-          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o "downonly-linux-arm64-${VERSION}" .
+          GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o "downonly_linux_arm64_${VERSION}" .
           # ARMv7
-          GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o "downonly-linux-armv7-${VERSION}" .
+          GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o "downonly_linux_armv7_${VERSION}" .
           # ARMv6
-          GOOS=linux GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o "downonly-linux-armv6-${VERSION}" .
+          GOOS=linux GOARCH=arm GOARM=6 go build -ldflags="-s -w" -o "downonly_linux_armv6_${VERSION}" .
           # MIPS
-          GOOS=linux GOARCH=mips GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips-${VERSION}" .
-          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mipsle-${VERSION}" .
+          GOOS=linux GOARCH=mips GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly_linux_mips_${VERSION}" .
+          GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly_linux_mipsle_${VERSION}" .
           # MIPS64
-          GOOS=linux GOARCH=mips64 GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips64-${VERSION}" .
-          GOOS=linux GOARCH=mips64le GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly-linux-mips64le-${VERSION}" .
+          GOOS=linux GOARCH=mips64 GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly_linux_mips64_${VERSION}" .
+          GOOS=linux GOARCH=mips64le GOMIPS=softfloat go build -ldflags="-s -w" -o "downonly_linux_mips64le_${VERSION}" .
 
-      # 2. 构建 deb 包
+      # 2. 打包为 tar.gz（每个二进制单独归档）
+      - name: Archive binaries to tar.gz
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          for bin in downonly_linux_*_${VERSION}; do
+            # 去掉末尾的 _v1.x.x 版本号得到包名
+            base="${bin%_${VERSION}}"
+            tar -czf "${base}_${VERSION}.tar.gz" -C . "${bin}"
+            rm -f "${bin}"
+          done
+
+      # 3. 构建 deb 包（覆盖所有架构）
       - name: Build deb packages
         run: |
           VERSION=${GITHUB_REF_NAME}
@@ -49,9 +60,14 @@ jobs:
           PKG_VERSION=${VERSION#v}
 
           build_deb() {
-            local arch=$1 binary=$2 deb_arch=$3
+            local deb_arch=$1 binary=$2
             local pkg_name="downonly_${PKG_VERSION}_${deb_arch}"
             local pkg_dir="${pkg_name}"
+
+            # 从对应 tar.gz 中取出二进制
+            local base="${binary%_${VERSION}}"
+            tar -xzf "${base}_${VERSION}.tar.gz"
+            chmod +x "${binary}"
 
             mkdir -p "${pkg_dir}/usr/local/bin"
             mkdir -p "${pkg_dir}/etc/systemd/system"
@@ -89,52 +105,78 @@ jobs:
           Description: DownOnly - Bandwidth consumption service
           EOF
 
-            # postinst: enable and start service
+            # postinst: enable and start service (also reload on upgrade)
             cat > "${pkg_dir}/DEBIAN/postinst" <<'EOF'
           #!/bin/sh
+          set -e
           systemctl daemon-reload
           systemctl enable downonly.service
-          systemctl start downonly.service
+          systemctl restart downonly.service
           EOF
             chmod 755 "${pkg_dir}/DEBIAN/postinst"
 
             # prerm: stop service
             cat > "${pkg_dir}/DEBIAN/prerm" <<'EOF'
           #!/bin/sh
+          set -e
           systemctl stop downonly.service || true
-          systemctl disable downonly.service || true
           EOF
             chmod 755 "${pkg_dir}/DEBIAN/prerm"
 
+            # postrm: disable service on removal
+            cat > "${pkg_dir}/DEBIAN/postrm" <<'EOF'
+          #!/bin/sh
+          set -e
+          systemctl disable downonly.service || true
+          rm -f /etc/systemd/system/downonly.service
+          systemctl daemon-reload || true
+          EOF
+            chmod 755 "${pkg_dir}/DEBIAN/postrm"
+
             dpkg-deb --build "${pkg_dir}"
-            rm -rf "${pkg_dir}"
+            rm -rf "${pkg_dir}" "${binary}"
           }
 
-          build_deb amd64 "downonly-linux-amd64-${VERSION}" amd64
-          build_deb arm64 "downonly-linux-arm64-${VERSION}" arm64
-          build_deb armhf "downonly-linux-armv7-${VERSION}" armhf
+          # 架构映射：deb_arch  对照编译产物
+          build_deb amd64    "downonly_linux_amd64_${VERSION}"
+          build_deb arm64    "downonly_linux_arm64_${VERSION}"
+          build_deb armhf    "downonly_linux_armv7_${VERSION}"
+          build_deb armel    "downonly_linux_armv6_${VERSION}"
+          build_deb mips     "downonly_linux_mips_${VERSION}"
+          build_deb mipsel   "downonly_linux_mipsle_${VERSION}"
+          build_deb mips64   "downonly_linux_mips64_${VERSION}"
+          build_deb mips64el "downonly_linux_mips64le_${VERSION}"
 
-      # 3. 上传到 Release
+      # 4. 生成 SHA256 校验文件
+      - name: Generate SHA256 checksums
+        run: |
+          sha256sum downonly_*.tar.gz downonly_*.deb > checksums_${GITHUB_REF_NAME}.txt
+          cat checksums_${GITHUB_REF_NAME}.txt
+
+      # 5. 上传到 Release
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: downonly-*
+          files: |
+            downonly_*.tar.gz
+            downonly_*.deb
+            checksums_*.txt
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 4. 设置多架构环境
+      # 5. 设置多架构环境
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 5. 将仓库名转换为全小写
+      # 6. 将仓库名转换为全小写
       - name: Lowercase repo name
         run: |
           echo "IMAGE_NAME=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_ENV
 
-      # 6. 登录 GHCR
+      # 7. 登录 GHCR
       - name: Login to GHCR
         uses: docker/login-action@v3
         with:
@@ -142,14 +184,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # 7. 登录 Docker Hub
+      # 8. 登录 Docker Hub
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 8. 构建并推送镜像
+      # 9. 构建并推送镜像
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:

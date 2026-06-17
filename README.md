@@ -61,7 +61,7 @@
 
 ### 方式一：一键安装（推荐）
 
-**适用于 Linux 系统（x86_64 / ARM64），自动处理所有依赖和配置。**
+**适用于 Linux 系统（x86_64 / ARM64 / ARMv7 / ARMv6），自动处理所有依赖和配置。**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/EchoPing07/DownOnly/main/install.sh | bash
@@ -69,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/EchoPing07/DownOnly/main/install.sh
 
 **安装过程说明：**
 1. 自动检测系统架构
-2. 从 GitHub Release 下载预编译文件（若无则本地编译）
+2. 从 GitHub Release 下载预编译文件（自动 SHA256 校验，若无则本地编译）
 3. 配置 systemd 服务
 4. 安装管理脚本到系统
 
