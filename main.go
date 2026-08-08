@@ -3,6 +3,7 @@
 import (
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -36,6 +37,17 @@ var logsDir = filepath.Join(dataDir, "logs")
 
 var dateRegexp = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 
+// errSlowSwitch 哨兵错误：判定器检测到当前源持续低速，通知 doDownload 中断切换
+var errSlowSwitch = fmt.Errorf("slow source switch")
+
+// URL 状态常量
+const (
+	statusNormal  = "normal"
+	statusSlow    = "slow"
+	statusFailed  = "failed"
+	statusUnknown = "unknown"
+)
+
 // 私有/保留地址 CIDR（预解析，避免运行时重复计算）
 var (
 	cidr10         = mustParseCIDR("10.0.0.0/8")
@@ -57,29 +69,58 @@ func mustParseCIDR(s string) *net.IPNet {
 
 // --- 数据结构 ---
 
-// Config 应用配置，持久化至 config.json
-type Config struct {
-	SpeedLimitMbps    int      `json:"speed_limit_mbps"`
-	DailyQuotaMinGB   int      `json:"daily_quota_min_gb"`
-	DailyQuotaMaxGB   int      `json:"daily_quota_max_gb"`
-	ScheduleStart     string   `json:"schedule_start"`
-	ScheduleEnd       string   `json:"schedule_end"`
-	SleepMinMinutes   int      `json:"sleep_min_minutes"`
-	SleepMaxMinutes   int      `json:"sleep_max_minutes"`
-	SleepDisabled     bool     `json:"sleep_disabled"`
-	URLs              []string `json:"urls"`
-	AllowPublicAccess bool     `json:"allow_public_access"`
+// URLEntry 单个下载源条目，Status 随运行时与测试结果流转
+//   normal  正常，一等候选
+//   slow    运行中判定为低速，永久绕过（不参与慢切换候选），仅可被失败覆盖或手动恢复
+//   failed  不可用，选源时跳过
+//   unknown 新增/导入未测，等同 normal 参与选源
+type URLEntry struct {
+	URL      string `json:"url"`
+	Status   string `json:"status"`
+	Attempts int    `json:"attempts"`
 }
 
-// UnmarshalJSON 兼容旧版 block_public_access 字段
+// Config 应用配置，持久化至 config.json
+type Config struct {
+	SpeedLimitMbps       int        `json:"speed_limit_mbps"`
+	MinSpeedMbps         int        `json:"min_speed_mbps"`          // 最低速率，0=关闭慢速切换
+	SlowSwitchThreshold  int        `json:"slow_switch_threshold"`   // 低速秒数占比阈值 10-90，默认 60
+	SlowSwitchMaxAttempts int       `json:"slow_switch_max_attempts"` // 慢切换最大尝试次数，默认 3
+	DailyQuotaMinGB      int        `json:"daily_quota_min_gb"`
+	DailyQuotaMaxGB      int        `json:"daily_quota_max_gb"`
+	ScheduleStart        string     `json:"schedule_start"`
+	ScheduleEnd          string     `json:"schedule_end"`
+	SleepMinMinutes      int        `json:"sleep_min_minutes"`
+	SleepMaxMinutes      int        `json:"sleep_max_minutes"`
+	SleepDisabled        bool       `json:"sleep_disabled"`
+	URLs                 []URLEntry `json:"urls"`
+	AllowPublicAccess    bool       `json:"allow_public_access"`
+}
+
+// UnmarshalJSON 兼容旧版 block_public_access 字段与旧版 urls([]string) 格式
 func (c *Config) UnmarshalJSON(data []byte) error {
 	type Alias Config
 	aux := &struct {
-		BlockPublicAccess *bool `json:"block_public_access"`
+		BlockPublicAccess *bool     `json:"block_public_access"`
+		URLs              []json.RawMessage `json:"urls"`
 		*Alias
 	}{Alias: (*Alias)(c)}
 	if err := json.Unmarshal(data, aux); err != nil { return err }
 	if aux.BlockPublicAccess != nil && !*aux.BlockPublicAccess { c.AllowPublicAccess = true }
+	// urls 可能是旧版 []string 或新版 []URLEntry，逐个探测
+	if aux.URLs != nil {
+		entries := make([]URLEntry, 0, len(aux.URLs))
+		for _, raw := range aux.URLs {
+			var s string
+			if json.Unmarshal(raw, &s) == nil {
+				entries = append(entries, URLEntry{URL: s, Status: statusUnknown})
+				continue
+			}
+			var e URLEntry
+			if json.Unmarshal(raw, &e) == nil { entries = append(entries, e) }
+		}
+		c.URLs = entries
+	}
 	return nil
 }
 
@@ -118,6 +159,13 @@ type App struct {
 	bytesThisSecond   atomic.Uint64
 	bytesAccumulator  atomic.Uint64
 	currentSpeedLimit atomic.Int64
+
+	// 慢速切换相关（mu 保护，除 shouldSwitch 为 atomic 供 doDownload 高频检测）
+	currentURL            string
+	currentURLStart       time.Time
+	shouldSwitch          atomic.Bool // 判定器置位 → doDownload 中断切源
+	sessionSlowTriggered  bool         // 本次下载期间是否触发过慢判定
+	noCandidateNotified   bool         // 无候选日志去重
 }
 
 // --- 持久化：配置 ---
@@ -127,11 +175,12 @@ func (app *App) loadConfig() {
 	data, err := os.ReadFile(filepath.Join(dataDir, "config.json"))
 	if err != nil {
 		app.config = Config{
-			SpeedLimitMbps: 5, DailyQuotaMinGB: 150, DailyQuotaMaxGB: 200,
+			SpeedLimitMbps: 5, MinSpeedMbps: 0, SlowSwitchThreshold: 60, SlowSwitchMaxAttempts: 3,
+			DailyQuotaMinGB: 150, DailyQuotaMaxGB: 200,
 			ScheduleStart: "00:00", ScheduleEnd: "23:59",
 			SleepMinMinutes: 10, SleepMaxMinutes: 20,
 			AllowPublicAccess: false,
-			URLs: []string{"http://updates-http.cdn-apple.com/2019WinterFCS/fullrestores/041-39257/32129B6C-292C-11E9-9E72-4511412B0A59/iPhone_4.7_12.1.4_16D57_Restore.ipsw"},
+			URLs: []URLEntry{{URL: "http://updates-http.cdn-apple.com/2019WinterFCS/fullrestores/041-39257/32129B6C-292C-11E9-9E72-4511412B0A59/iPhone_4.7_12.1.4_16D57_Restore.ipsw", Status: statusUnknown}},
 		}
 		app.saveConfig()
 		return
@@ -145,12 +194,26 @@ func (app *App) loadConfig() {
 // fixConfig 修正非法配置值并同步速率限制到原子变量
 func (app *App) fixConfig() {
 	if app.config.SpeedLimitMbps <= 0 { app.config.SpeedLimitMbps = 5 }
+	if app.config.MinSpeedMbps < 0 { app.config.MinSpeedMbps = 0 }
+	if app.config.MinSpeedMbps > app.config.SpeedLimitMbps { app.config.MinSpeedMbps = app.config.SpeedLimitMbps }
+	if app.config.SlowSwitchThreshold < 10 { app.config.SlowSwitchThreshold = 60 }
+	if app.config.SlowSwitchThreshold > 90 { app.config.SlowSwitchThreshold = 90 }
+	if app.config.SlowSwitchMaxAttempts <= 0 { app.config.SlowSwitchMaxAttempts = 3 }
 	if app.config.DailyQuotaMinGB <= 0 { app.config.DailyQuotaMinGB = 150 }
 	if app.config.DailyQuotaMaxGB <= 0 { app.config.DailyQuotaMaxGB = 200 }
 	if app.config.DailyQuotaMaxGB < app.config.DailyQuotaMinGB { app.config.DailyQuotaMaxGB = app.config.DailyQuotaMinGB }
 	if app.config.SleepMinMinutes <= 0 { app.config.SleepMinMinutes = 10 }
 	if app.config.SleepMaxMinutes <= 0 { app.config.SleepMaxMinutes = 20 }
 	if app.config.SleepMaxMinutes < app.config.SleepMinMinutes { app.config.SleepMaxMinutes = app.config.SleepMinMinutes }
+	// 修正 URL 条目状态默认值
+	for i := range app.config.URLs {
+		if app.config.URLs[i].URL == "" { continue }
+		s := app.config.URLs[i].Status
+		if s != statusNormal && s != statusSlow && s != statusFailed && s != statusUnknown {
+			app.config.URLs[i].Status = statusUnknown
+		}
+		if app.config.URLs[i].Attempts < 0 { app.config.URLs[i].Attempts = 0 }
+	}
 	app.currentSpeedLimit.Store(int64(app.config.SpeedLimitMbps))
 }
 
@@ -169,6 +232,15 @@ func validateTimeStr(s string) bool {
 func validateConfig(cfg Config) error {
 	if cfg.SpeedLimitMbps < 1 || cfg.SpeedLimitMbps > 1000 {
 		return fmt.Errorf("速率限制须在 1~1000 Mbps 之间")
+	}
+	if cfg.MinSpeedMbps < 0 || cfg.MinSpeedMbps > cfg.SpeedLimitMbps {
+		return fmt.Errorf("最低速率须在 0 至速率限制之间")
+	}
+	if cfg.SlowSwitchThreshold < 10 || cfg.SlowSwitchThreshold > 90 {
+		return fmt.Errorf("慢速切换阈值须在 10%%~90%% 之间")
+	}
+	if cfg.SlowSwitchMaxAttempts < 1 || cfg.SlowSwitchMaxAttempts > 99 {
+		return fmt.Errorf("慢速切换最大尝试次数须在 1~99 之间")
 	}
 	if cfg.DailyQuotaMinGB < 1 || cfg.DailyQuotaMinGB > 99999 {
 		return fmt.Errorf("每日限额最小值须在 1~99999 GB 之间")
@@ -338,6 +410,11 @@ func (app *App) checkDateChange() {
 	for k := range app.stats.Daily {
 		if !strings.HasPrefix(k, thisYear) { delete(app.stats.Daily, k) }
 	}
+	// 日期变更：全量重置所有源的慢切换计数器
+	for i := range app.config.URLs {
+		app.config.URLs[i].Attempts = 0
+	}
+	app.saveConfig()
 }
 
 // parseTimeStr 将 HH:MM 解析为自午夜起的分钟数
@@ -382,6 +459,36 @@ var userAgents = []string{
 	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
 }
 
+// pickNextURL 选源。triggeredBySlow=true 表示慢切换触发（候选={normal,unknown}，无候选返回 nil）；
+// false 表示 EOF 后新轮次（优先 {normal,unknown}，无则用 slow 兑底，failed 不选）。
+func (app *App) pickNextURL(triggeredBySlow bool) *URLEntry {
+	var normal, slow []int
+	for i := range app.config.URLs {
+		u := &app.config.URLs[i]
+		if u.URL == "" { continue }
+		switch u.Status {
+		case statusNormal, statusUnknown:
+			normal = append(normal, i)
+		case statusSlow:
+			slow = append(slow, i)
+		}
+	}
+	rand.Shuffle(len(normal), func(i, j int) { normal[i], normal[j] = normal[j], normal[i] })
+	rand.Shuffle(len(slow), func(i, j int) { slow[i], slow[j] = slow[j], slow[i] })
+	if len(normal) > 0 { return &app.config.URLs[normal[0]] }
+	if triggeredBySlow { return nil } // 慢切换不兑底 slow
+	if len(slow) > 0 { return &app.config.URLs[slow[0]] }
+	return nil
+}
+
+// findURLEntry 返回指定 URL 的条目指针，找不到返回 nil
+func (app *App) findURLEntry(rawURL string) *URLEntry {
+	for i := range app.config.URLs {
+		if app.config.URLs[i].URL == rawURL { return &app.config.URLs[i] }
+	}
+	return nil
+}
+
 // downloadWorker 主下载循环：检查调度/额度 → 选择地址 → 执行下载 → 休眠
 func (app *App) downloadWorker() {
 	for {
@@ -390,76 +497,120 @@ func (app *App) downloadWorker() {
 		app.mu.Lock()
 		if !app.isInSchedule() {
 			app.status = "out_of_schedule"; app.shouldStop.Store(true)
+			app.currentURL = ""
 			app.mu.Unlock(); app.sleepWithCheck(30); continue
 		}
 		if app.isQuotaReached() {
 			app.status = "quota_reached"; app.shouldStop.Store(true)
+			app.currentURL = ""
 			app.mu.Unlock(); app.sleepWithCheck(60); continue
 		}
-		urls := make([]string, len(app.config.URLs)); copy(urls, app.config.URLs)
-		sleepMin := app.config.SleepMinMinutes; sleepMax := app.config.SleepMaxMinutes
-		sleepDisabled := app.config.SleepDisabled
-		app.mu.Unlock()
-
-		if len(urls) == 0 {
-			app.mu.Lock(); app.addLog("没有配置下载地址，服务已停止")
+		if len(app.config.URLs) == 0 {
+			app.addLog("没有配置下载地址，服务已停止")
 			app.isRunning.Store(false); app.status = "stopped"; app.shouldStop.Store(true)
 			app.stats.Enabled = false; app.saveStats()
 			app.mu.Unlock(); continue
 		}
-
-		// 多地址随机顺序尝试，单地址重试一次
-		var tryURLs []string
-		if len(urls) == 1 {
-			tryURLs = []string{urls[0], urls[0]}
-		} else {
-			shuffled := make([]string, len(urls))
-			copy(shuffled, urls)
-			rand.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
-			tryURLs = shuffled
+		// EOF 后新轮次选源：优先 {normal,unknown}，无则用 slow 兑底，failed 不选
+		entry := app.pickNextURL(false)
+		if entry == nil {
+			app.addLog("没有可用下载地址，服务已停止")
+			app.isRunning.Store(false); app.status = "stopped"; app.shouldStop.Store(true)
+			app.stats.Enabled = false; app.saveStats()
+			app.mu.Unlock(); continue
 		}
+		sleepMin := app.config.SleepMinMinutes; sleepMax := app.config.SleepMaxMinutes
+		sleepDisabled := app.config.SleepDisabled
+		app.mu.Unlock()
 
-		var lastErr error
+		// 单源时重试一次，多源不重试（由选源轮换覆盖）
+		maxTries := 1
+		if len(app.config.URLs) == 1 { maxTries = 2 }
+
 		var succeeded bool
-		for _, u := range tryURLs {
+		var slowSwitched bool
+		for try := 0; try < maxTries; try++ {
 			if !app.isRunning.Load() { break }
+			u := entry.URL
 			if !isAllowedURL(u) {
-				app.mu.Lock(); app.addLog("URL 不安全，已跳过: " + u); app.mu.Unlock()
-				continue
+				app.mu.Lock()
+				app.addLog("URL 不安全，已跳过: " + u)
+				if e := app.findURLEntry(u); e != nil { e.Status = statusFailed }
+				app.saveConfig()
+				app.mu.Unlock()
+				break
 			}
-			app.mu.Lock(); app.status = "running"; app.shouldStop.Store(false)
-			app.addLog("开始下载: " + u); app.mu.Unlock()
+
+			// 进入下载：重置会话级状态
+			app.mu.Lock()
+			app.currentURL = u
+			app.currentURLStart = time.Now()
+			app.shouldSwitch.Store(false)
+			app.sessionSlowTriggered = false
+			app.noCandidateNotified = false
+			app.status = "running"; app.shouldStop.Store(false)
+			app.addLog("开始下载: " + u)
+			app.mu.Unlock()
 
 			downloaded, err := app.doDownload(u)
 
 			app.mu.Lock()
-			if err != nil {
+			curEntry := app.findURLEntry(u)
+			switch {
+			case errors.Is(err, errSlowSwitch):
+				// 状态与 attempts 已由判定器更新，此处仅记录日志
+				app.addLog(fmt.Sprintf("低速切换，已传输 %s", formatBytes(downloaded)))
+				app.mu.Unlock()
+				// 慢切换后立即尝试选下一个源（候选={normal,unknown}）
+				app.mu.Lock()
+				next := app.pickNextURL(true)
+				app.mu.Unlock()
+				if next != nil {
+					entry = next
+					slowSwitched = true
+					continue // 慢切换不睡觉，直接试下一个源
+				}
+				// 无候选：不切，当前源慢跑，退出 for-try
+				app.mu.Lock()
+				app.addLog("无可用候选源，当前源继续慢跑")
+				app.mu.Unlock()
+				break
+			case err != nil:
 				app.addLog(fmt.Sprintf("下载异常: %v (已传输 %s)", err, formatBytes(downloaded)))
-				lastErr = err
-			} else {
-				app.addLog(fmt.Sprintf("下载完成: %s", formatBytes(downloaded)))
+				if curEntry != nil { curEntry.Status = statusFailed }
+				app.saveConfig()
+				app.mu.Unlock()
+			default: // EOF 成功
+				if app.sessionSlowTriggered {
+					// 本次下载期间触发过慢判定且未达标，保持原状态
+					app.addLog(fmt.Sprintf("下载完成但低速未恢复: %s", formatBytes(downloaded)))
+				} else {
+					app.addLog(fmt.Sprintf("下载完成: %s", formatBytes(downloaded)))
+					if curEntry != nil { curEntry.Status = statusNormal; curEntry.Attempts = 0 }
+					app.saveConfig()
+				}
+				app.mu.Unlock()
 				succeeded = true
 			}
-			app.mu.Unlock()
-
-			if succeeded { break }
+			if succeeded || errors.Is(err, errSlowSwitch) { break }
+			// 非慢切换的失败：单源重试场景下再试一次
 			if app.isRunning.Load() {
-				app.mu.Lock(); app.addLog("下载失败，切换到下一个地址"); app.mu.Unlock()
+				app.mu.Lock(); app.addLog("下载失败，重试该地址"); app.mu.Unlock()
 			}
 		}
 
 		if !app.isRunning.Load() { continue }
+		if slowSwitched { continue } // 慢切换已换源，不睡觉直接下一轮
 
-		if !succeeded && lastErr != nil {
-			if !sleepDisabled {
-				if sleepMax < sleepMin { sleepMax = sleepMin }
-				sleepMinSec := sleepMin * 60; sleepMaxSec := sleepMax * 60
-				sleepSec := sleepMinSec
-				if sleepMaxSec > sleepMinSec { sleepSec = rand.Intn(sleepMaxSec-sleepMinSec) + sleepMinSec }
-				app.mu.Lock(); app.status = "sleeping"
-				app.addLog(fmt.Sprintf("所有地址均失败，休息 %d 分 %d 秒", sleepSec/60, sleepSec%60)); app.mu.Unlock()
-				app.sleepWithCheck(sleepSec)
-			}
+		// 休息逻辑
+		if !succeeded && !sleepDisabled {
+			if sleepMax < sleepMin { sleepMax = sleepMin }
+			sleepMinSec := sleepMin * 60; sleepMaxSec := sleepMax * 60
+			sleepSec := sleepMinSec
+			if sleepMaxSec > sleepMinSec { sleepSec = rand.Intn(sleepMaxSec-sleepMinSec) + sleepMinSec }
+			app.mu.Lock(); app.status = "sleeping"
+			app.addLog(fmt.Sprintf("所有地址均失败，休息 %d 分 %d 秒", sleepSec/60, sleepSec%60)); app.mu.Unlock()
+			app.sleepWithCheck(sleepSec)
 		} else if succeeded && !sleepDisabled {
 			if sleepMax < sleepMin { sleepMax = sleepMin }
 			sleepMinSec := sleepMin * 60; sleepMaxSec := sleepMax * 60
@@ -472,7 +623,8 @@ func (app *App) downloadWorker() {
 	}
 }
 
-// doDownload 执行单次 HTTP 下载，按速率限制节流并累计流量
+// doDownload 执行单次 HTTP 下载，按速率限制节流并累计流量。
+// 检测到 shouldSwitch（判定器置位）时返回 errSlowSwitch，由 worker 走切换分支。
 func (app *App) doDownload(url string) (uint64, error) {
 	client := &http.Client{
 		Timeout:   2 * time.Hour,
@@ -497,6 +649,7 @@ func (app *App) doDownload(url string) (uint64, error) {
 
 	for {
 		if app.shouldStop.Load() || !app.isRunning.Load() { return total, nil }
+		if app.shouldSwitch.Load() { return total, errSlowSwitch }
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
 			total += uint64(n); chunkBytes += int64(n)
@@ -533,7 +686,7 @@ func (app *App) speedTracker() {
 		if !app.isRunning.Load() { mbps = 0 }
 		app.speedMbps = mbps
 		app.speedHistory = append(app.speedHistory, mbps)
-		if len(app.speedHistory) > 30 { app.speedHistory = app.speedHistory[len(app.speedHistory)-30:] }
+		if len(app.speedHistory) > 60 { app.speedHistory = app.speedHistory[len(app.speedHistory)-60:] }
 		if app.isRunning.Load() {
 			if !app.isInSchedule() { app.shouldStop.Store(true); app.status = "out_of_schedule"
 			} else if app.isQuotaReached() { app.shouldStop.Store(true); app.status = "quota_reached"
@@ -550,6 +703,72 @@ func (app *App) autoSaver() {
 		app.saveStats()
 		app.saveTodayLogs()
 		app.mu.Unlock()
+	}
+}
+
+// slowSwitchJudge 每 5 秒检测当前下载源是否持续低速，必要时触发切换。
+// 判定逻辑：speedHistory 最近 60 个采样中，低于 MinSpeedMbps 的秒数占比超阈值 → 慢。
+// 每个源开始下载后延迟 60s 才参与判定（兼任预热，避免慢启动误判）。
+func (app *App) slowSwitchJudge() {
+	for range time.NewTicker(5 * time.Second).C {
+		app.mu.Lock()
+		// 关闭 / 空闲 / 预热未过 → 跳过
+		if app.config.MinSpeedMbps <= 0 || !app.isRunning.Load() || app.currentURL == "" || app.currentURLStart.IsZero() {
+			app.mu.Unlock(); continue
+		}
+		if time.Since(app.currentURLStart) < 60*time.Second { app.mu.Unlock(); continue }
+		cur := app.currentURL
+		minSpeed := app.config.MinSpeedMbps
+		threshold := app.config.SlowSwitchThreshold
+		maxAttempts := app.config.SlowSwitchMaxAttempts
+		hist := make([]float64, len(app.speedHistory))
+		copy(hist, app.speedHistory)
+		app.mu.Unlock()
+
+		// 统计低速秒数占比
+		var lowCount int
+		for _, v := range hist {
+			if float64(v) < float64(minSpeed) { lowCount++ }
+		}
+		ratio := 0
+		if len(hist) > 0 { ratio = lowCount * 100 / len(hist) }
+		if ratio <= threshold { continue } // 不慢
+
+		app.mu.Lock()
+		// 标记本次下载期间触发过慢判定
+		app.sessionSlowTriggered = true
+		curEntry := app.findURLEntry(cur)
+		if curEntry == nil { app.mu.Unlock(); continue }
+
+		// 达最大尝试次数：静默不切（达 max 不重复打日志）
+		if curEntry.Attempts >= maxAttempts { app.mu.Unlock(); continue }
+
+		// 检查慢切换候选池（排除当前源后的 {normal,unknown}）
+		hasCandidate := false
+		for i := range app.config.URLs {
+			u := &app.config.URLs[i]
+			if u.URL == cur { continue }
+			if u.Status == statusNormal || u.Status == statusUnknown { hasCandidate = true; break }
+		}
+
+		if hasCandidate {
+			curEntry.Status = statusSlow
+			curEntry.Attempts++
+			app.shouldSwitch.Store(true)
+			app.addLog(fmt.Sprintf("%s 速率过低（低速占比 %d%%），切换下一个源（第 %d/%d 次）",
+				cur, ratio, curEntry.Attempts, maxAttempts))
+			app.saveConfig()
+			app.mu.Unlock()
+		} else {
+			// 无候选：当前源标 slow（若还不是），不切，慢跑，日志去重
+			if curEntry.Status != statusSlow { curEntry.Status = statusSlow }
+			if !app.noCandidateNotified {
+				app.noCandidateNotified = true
+				app.addLog(fmt.Sprintf("%s 速率过低但无可用候选源，当前源继续慢跑（请检查链接质量或网络环境）", cur))
+				app.saveConfig()
+			}
+			app.mu.Unlock()
+		}
 	}
 }
 
@@ -576,7 +795,9 @@ func (app *App) handleToggle(w http.ResponseWriter, r *http.Request) {
 	if nowRunning {
 		app.status = "running"; app.shouldStop.Store(false); app.startedAt = time.Now(); app.addLog("服务已启动")
 	} else {
-		app.status = "stopped"; app.shouldStop.Store(true); app.speedMbps = 0; app.addLog("服务已停止")
+		app.status = "stopped"; app.shouldStop.Store(true); app.speedMbps = 0
+		app.currentURL = ""; app.shouldSwitch.Store(false)
+		app.addLog("服务已停止")
 	}
 	app.stats.Enabled = nowRunning
 	app.saveStats(); app.saveTodayLogs()
@@ -625,7 +846,8 @@ func (app *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"entries": entries})
 }
 
-// handleTestURL 探测指定 URL 的可达性（GET + Range 只取 1 字节）
+// handleTestURL 探测指定 URL 的可达性（GET + Range 只取 1 字节）。
+// 测试结果同步更新 URL 状态：通过则 failed/unknown→normal（slow 不变）；失败则 normal/unknown→failed（slow/failed 不变）。
 func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
 	rawURL := r.URL.Query().Get("url")
 	if rawURL == "" || !isAllowedURL(rawURL) {
@@ -636,6 +858,7 @@ func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
+		app.applyTestResult(rawURL, false)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
 		return
@@ -644,14 +867,51 @@ func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
 	req.Header.Set("User-Agent", userAgents[rand.Intn(len(userAgents))])
 	resp, err := client.Do(req)
 	if err != nil {
+		app.applyTestResult(rawURL, false)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
 		return
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
+	ok := resp.StatusCode >= 200 && resp.StatusCode < 400
+	app.applyTestResult(rawURL, ok)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": resp.StatusCode >= 200 && resp.StatusCode < 400})
+	json.NewEncoder(w).Encode(map[string]bool{"ok": ok})
+}
+
+// applyTestResult 根据测试结果更新单个 URL 的持久化状态
+func (app *App) applyTestResult(rawURL string, ok bool) {
+	app.mu.Lock()
+	defer app.mu.Unlock()
+	e := app.findURLEntry(rawURL)
+	if e == nil { return }
+	if ok {
+		if e.Status == statusFailed || e.Status == statusUnknown { e.Status = statusNormal }
+		// slow 不被批量测试洗白
+	} else {
+		if e.Status == statusNormal || e.Status == statusUnknown { e.Status = statusFailed }
+		// slow/failed 不变
+	}
+	app.saveConfig()
+}
+
+// handleRestoreURL 手动将指定 URL 恢复为正常（slow/failed→normal，attempts 清零）
+func (app *App) handleRestoreURL(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" { http.Error(w, "", 405); return }
+	rawURL := r.URL.Query().Get("url")
+	app.mu.Lock(); defer app.mu.Unlock()
+	e := app.findURLEntry(rawURL)
+	if e == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]bool{"ok": false}); return
+	}
+	e.Status = statusNormal
+	e.Attempts = 0
+	app.saveConfig()
+	app.addLog("手动恢复正常: " + rawURL)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 }
 
 // handleConfig GET 返回当前配置，POST 更新配置
@@ -671,11 +931,29 @@ func (app *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		app.mu.Lock()
+		// URL 的 status/attempts 为服务端权威：保留当前服务端状态，仅新增 URL 标 unknown。
+		// 避免前端陈旧快照覆盖运行时慢速/失败检测。
+		oldEntries := make(map[string]URLEntry, len(app.config.URLs))
+		for _, e := range app.config.URLs { oldEntries[e.URL] = e }
+		for i := range cfg.URLs {
+			if old, ok := oldEntries[cfg.URLs[i].URL]; ok {
+				cfg.URLs[i].Status = old.Status
+				cfg.URLs[i].Attempts = old.Attempts
+			} else {
+				cfg.URLs[i].Status = statusUnknown
+				cfg.URLs[i].Attempts = 0
+			}
+		}
 		app.config = cfg; app.fixConfig(); app.saveConfig()
 		sleepInfo := fmt.Sprintf("休息 %d~%d 分钟", app.config.SleepMinMinutes, app.config.SleepMaxMinutes)
 		if app.config.SleepDisabled { sleepInfo = "休息已禁用" }
-		app.addLog(fmt.Sprintf("配置已更新: %d Mbps, %d~%d GB/天, %s-%s, %s, 允许公网: %v",
-			app.config.SpeedLimitMbps, app.config.DailyQuotaMinGB, app.config.DailyQuotaMaxGB,
+		slowInfo := "慢速切换关闭"
+		if app.config.MinSpeedMbps > 0 {
+			slowInfo = fmt.Sprintf("慢速切换 %dMbps/占比 %d%%/最大 %d 次",
+				app.config.MinSpeedMbps, app.config.SlowSwitchThreshold, app.config.SlowSwitchMaxAttempts)
+		}
+		app.addLog(fmt.Sprintf("配置已更新: %d Mbps, %s, %d~%d GB/天, %s-%s, %s, 允许公网: %v",
+			app.config.SpeedLimitMbps, slowInfo, app.config.DailyQuotaMinGB, app.config.DailyQuotaMaxGB,
 			app.config.ScheduleStart, app.config.ScheduleEnd,
 			sleepInfo, app.config.AllowPublicAccess))
 		if app.stats.TodayQuotaGB < app.config.DailyQuotaMinGB || app.stats.TodayQuotaGB > app.config.DailyQuotaMaxGB {
@@ -718,7 +996,10 @@ func getRemoteIP(r *http.Request) string {
 // blockPublicMiddleware 公网访问拦截中间件，未开启公网访问时仅允许私有地址
 func (app *App) blockPublicMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !app.config.AllowPublicAccess {
+		app.mu.Lock()
+		allow := app.config.AllowPublicAccess
+		app.mu.Unlock()
+		if !allow {
 			ip := net.ParseIP(getRemoteIP(r))
 			if ip == nil || !isPrivateIP(ip) {
 				http.Error(w, "Forbidden", http.StatusForbidden)
@@ -782,7 +1063,7 @@ func main() {
 
 	app := &App{
 		status:        "stopped",
-		speedHistory:  make([]float64, 30),
+		speedHistory:  make([]float64, 60),
 		todayLogsDate: time.Now().Format("2006-01-02"),
 	}
 
@@ -813,6 +1094,7 @@ func main() {
 	go app.downloadWorker()
 	go app.speedTracker()
 	go app.autoSaver()
+	go app.slowSwitchJudge()
 
 	http.HandleFunc("/", app.blockPublicMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" { http.NotFound(w, r); return }
@@ -826,6 +1108,7 @@ func main() {
 	http.HandleFunc("/api/logs", app.blockPublicMiddleware(app.handleLogs))
 	http.HandleFunc("/api/config", app.blockPublicMiddleware(app.handleConfig))
 	http.HandleFunc("/api/test_url", app.blockPublicMiddleware(app.handleTestURL))
+	http.HandleFunc("/api/restore_url", app.blockPublicMiddleware(app.handleRestoreURL))
 
 	http.HandleFunc("/icons/", app.blockPublicMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/icons/")

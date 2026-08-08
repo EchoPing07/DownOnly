@@ -156,13 +156,21 @@
             <div class="flex-1 overflow-y-auto p-4 space-y-1 no-scrollbar min-h-[180px]" id="urls-list">
                 <!-- URL rows rendered by JS -->
             </div>
-            <div class="p-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 flex justify-between items-center gap-3">
-                <button onclick="batchTestUrls()" class="flex-1 py-3 bg-slate-200 dark:bg-slate-700 hover:bg-slate-300 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]">
-                    批量测试
-                </button>
-                <button onclick="addUrl()" class="flex-1 py-3 bg-primary hover:bg-blue-600 text-white rounded-2xl text-sm font-bold shadow-lg shadow-blue-500/20 transition-all active:scale-[0.98]">
-                    添加地址
-                </button>
+            <div class="p-4 border-t border-slate-100 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
+                <div class="flex flex-wrap gap-2">
+                    <button onclick="exportUrls()" class="flex-1 min-w-0 basis-[45%] sm:basis-auto py-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]">
+                        导出全部
+                    </button>
+                    <button onclick="importUrls()" class="flex-1 min-w-0 basis-[45%] sm:basis-auto py-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]">
+                        批量导入
+                    </button>
+                    <button onclick="batchTestUrls()" class="flex-1 min-w-0 basis-[45%] sm:basis-auto py-3 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-2xl text-sm font-bold transition-all active:scale-[0.98]">
+                        批量测试
+                    </button>
+                    <button onclick="addUrl()" class="flex-1 min-w-0 basis-[45%] sm:basis-auto py-3 bg-primary hover:bg-blue-600 text-white rounded-2xl text-sm font-bold shadow-lg shadow-blue-500/20 transition-all active:scale-[0.98]">
+                        添加地址
+                    </button>
+                </div>
             </div>
         </div>
     </div>
@@ -179,14 +187,35 @@
             </div>
             <div class="p-6 space-y-6">
                 <div>
-                    <div class="flex justify-between items-baseline px-1 mb-3">
-                        <span class="text-[11px] font-bold text-slate-400 uppercase">下载速率限制</span>
-                        <span class="text-sm font-bold text-primary"><span id="conf-speed">5</span> Mbps</span>
+                    <label class="block text-[11px] font-bold text-slate-400 uppercase mb-2 px-1">速率限制</label>
+                    <div class="flex items-center gap-3">
+                        <div class="flex-1 relative">
+                            <input id="conf-minspeed" type="number" min="0" max="1000" value="0" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                            <span class="absolute right-3 top-3.5 text-[10px] font-bold text-slate-300">Mbps</span>
+                        </div>
+                        <span class="text-slate-300 text-sm font-bold">至</span>
+                        <div class="flex-1 relative">
+                            <input id="conf-speed" type="number" min="1" max="1000" value="5" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                            <span class="absolute right-3 top-3.5 text-[10px] font-bold text-slate-300">Mbps</span>
+                        </div>
                     </div>
-                    <input id="conf-speed-slider" type="range" min="1" max="256" value="5" class="w-full h-1.5 bg-slate-100 dark:bg-slate-800 rounded-lg appearance-none cursor-pointer accent-primary" oninput="document.getElementById('conf-speed').innerText=this.value">
-                    <div class="flex justify-between text-[9px] text-slate-300 dark:text-slate-600 mt-1 px-1">
-                        <span>1 Mbps</span><span>256 Mbps</span>
+                    <div class="flex justify-between text-[9px] text-slate-300 dark:text-slate-600 mt-1.5 px-1">
+                        <span>最低速率（0=关闭）</span><span>下载速率上限</span>
                     </div>
+                    <div class="grid grid-cols-2 gap-3 mt-4">
+                        <div class="relative">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1.5 px-1">低速占比阈值</label>
+                            <div class="relative">
+                                <input id="conf-slow-threshold" type="number" min="10" max="90" value="60" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                                <span class="absolute right-3 top-3.5 text-[10px] font-bold text-slate-300">%</span>
+                            </div>
+                        </div>
+                        <div class="relative">
+                            <label class="block text-[10px] font-bold text-slate-400 uppercase mb-1.5 px-1">最大尝试次数</label>
+                            <input id="conf-slow-attempts" type="number" min="1" max="99" value="3" class="w-full bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl px-4 py-3 text-sm font-bold text-center focus:ring-1 focus:ring-primary focus:border-primary outline-none">
+                        </div>
+                    </div>
+                    <p class="text-[10px] text-slate-300 dark:text-slate-600 px-1 mt-2">连续 60 秒采样内实际速率低于最低值的占比超阈值时切换源；最低速率设为 0 则关闭该机制</p>
                 </div>
                 <div>
                     <label class="block text-[11px] font-bold text-slate-400 uppercase mb-2 px-1">每日限额区间</label>
@@ -439,8 +468,10 @@
             try {
                 const res = await fetch('/api/config'); if (!res.ok) return;
                 const c = await res.json();
-                document.getElementById('conf-speed').innerText = c.speed_limit_mbps;
-                document.getElementById('conf-speed-slider').value = c.speed_limit_mbps;
+                document.getElementById('conf-speed').value = c.speed_limit_mbps;
+                document.getElementById('conf-minspeed').value = c.min_speed_mbps || 0;
+                document.getElementById('conf-slow-threshold').value = c.slow_switch_threshold || 60;
+                document.getElementById('conf-slow-attempts').value = c.slow_switch_max_attempts || 3;
                 document.getElementById('conf-quota-min').value = c.daily_quota_min_gb;
                 document.getElementById('conf-quota-max').value = c.daily_quota_max_gb;
                 document.getElementById('conf-start').value = c.schedule_start;
@@ -471,11 +502,14 @@
 
         async function saveConfig() {
             // 清除旧的错误样式
-            ['conf-quota-min','conf-quota-max','conf-start','conf-end','conf-sleep-min','conf-sleep-max'].forEach(function(id) {
+            ['conf-speed','conf-minspeed','conf-quota-min','conf-quota-max','conf-start','conf-end','conf-sleep-min','conf-sleep-max'].forEach(function(id) {
                 clearInputError(document.getElementById(id));
             });
 
-            var speedMbps = parseInt(document.getElementById('conf-speed').innerText) || 5;
+            var speedMbps = parseInt(document.getElementById('conf-speed').value) || 5;
+            var minSpeed = parseInt(document.getElementById('conf-minspeed').value) || 0;
+            var slowThreshold = parseInt(document.getElementById('conf-slow-threshold').value) || 60;
+            var slowAttempts = parseInt(document.getElementById('conf-slow-attempts').value) || 3;
             var quotaMin = parseInt(document.getElementById('conf-quota-min').value);
             var quotaMax = parseInt(document.getElementById('conf-quota-max').value);
             var scheduleStart = document.getElementById('conf-start').value || '00:00';
@@ -485,6 +519,22 @@
             var sleepDisabled = document.getElementById('conf-sleep-disabled').dataset.on === 'true';
 
             // 前端校验
+            if (isNaN(speedMbps) || speedMbps < 1 || speedMbps > 1000) {
+                document.getElementById('conf-speed').classList.add('border-red-500','dark:border-red-500');
+                showToast('下载速率限制须在 1~1000 Mbps 之间'); return;
+            }
+            if (isNaN(minSpeed) || minSpeed < 0 || minSpeed > speedMbps) {
+                document.getElementById('conf-minspeed').classList.add('border-red-500','dark:border-red-500');
+                showToast('最低速率须在 0 至速率限制之间'); return;
+            }
+            if (isNaN(slowThreshold) || slowThreshold < 10 || slowThreshold > 90) {
+                document.getElementById('conf-slow-threshold').classList.add('border-red-500','dark:border-red-500');
+                showToast('低速占比阈值须在 10%~90% 之间'); return;
+            }
+            if (isNaN(slowAttempts) || slowAttempts < 1 || slowAttempts > 99) {
+                document.getElementById('conf-slow-attempts').classList.add('border-red-500','dark:border-red-500');
+                showToast('最大尝试次数须在 1~99 之间'); return;
+            }
             if (isNaN(quotaMin) || quotaMin < 1 || quotaMin > 99999) {
                 document.getElementById('conf-quota-min').classList.add('border-red-500','dark:border-red-500');
                 showToast('每日限额最小值须在 1~99999 GB 之间'); return;
@@ -519,6 +569,9 @@
 
             var cfg = {
                 speed_limit_mbps: speedMbps,
+                min_speed_mbps: minSpeed,
+                slow_switch_threshold: slowThreshold,
+                slow_switch_max_attempts: slowAttempts,
                 daily_quota_min_gb: quotaMin,
                 daily_quota_max_gb: quotaMax,
                 schedule_start: scheduleStart,
@@ -594,27 +647,38 @@
         }
 
         // ── 地址管理 ──
+        // currentUrls 为对象数组: {url, status, attempts}
+        // 状态: normal(正常) / slow(异常,慢) / failed(失败) / unknown(未知)
+        var URL_STATUS_META = {
+            normal:  { badge: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400', label: '正常' },
+            slow:    { badge: 'bg-amber-100 text-amber-700 dark:bg-amber-500/15 dark:text-amber-400',     label: '异常' },
+            failed:  { badge: 'bg-red-100 text-red-700 dark:bg-red-500/15 dark:text-red-400',           label: '失败' },
+            unknown: { badge: 'bg-slate-100 text-slate-500 dark:bg-slate-700/50 dark:text-slate-400',  label: '未知' }
+        };
 
         function renderUrlList() {
             var box = document.getElementById('urls-list');
             box.innerHTML = '';
             if (currentUrls.length === 0) {
-                box.innerHTML = '<div class="text-slate-300 dark:text-slate-600 text-center py-12 text-sm">暂无资源地址，点击下方"添加地址"</div>';
+                box.innerHTML = '<div class="text-slate-300 dark:text-slate-600 text-center py-12 text-sm">暂无资源地址，点击下方“添加地址”</div>';
                 return;
             }
-            currentUrls.forEach(function(url, i) {
+            currentUrls.forEach(function(item, i) {
+                var url = item.url;
+                var status = item.status || 'unknown';
+                var meta = URL_STATUS_META[status] || URL_STATUS_META.unknown;
+                var testing = urlTestStatus[url] === 'testing';
+                var badgeCls = testing ? 'bg-blue-100 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400 animate-pulse' : meta.badge;
+                var badgeText = testing ? '测试中' : meta.label;
                 var row = document.createElement('div');
                 row.className = 'flex items-center gap-2 py-1.5 px-3 rounded-xl hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors group';
                 row.dataset.idx = i;
-                var status = urlTestStatus[url];
-                var dotColor = status === 'ok' ? 'bg-emerald-500' : status === 'fail' ? 'bg-red-500' : status === 'testing' ? 'bg-blue-400 animate-pulse' : 'bg-slate-300';
-                row.innerHTML = '<div class="w-2 h-2 rounded-full ' + dotColor + ' shrink-0 url-dot"></div>'
+                row.innerHTML = '<span class="' + badgeCls + ' text-[10px] font-bold px-1.5 py-0.5 rounded-md shrink-0">' + badgeText + '</span>'
                     + '<span class="flex-1 text-sm font-mono truncate text-slate-600 dark:text-slate-300" title="' + url.replace(/"/g, '&quot;') + '">' + url.replace(/</g, '&lt;') + '</span>'
                     + '<span class="flex items-center shrink-0 gap-0.5">'
-                    + '<button onclick="removeUrl(' + i + ')" class="flex items-center justify-center w-6 h-6 rounded text-slate-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors" title="删除">'
-                    + '<span class="icon-container" style="width:18px;height:18px" data-icon="trash"></span></button>'
-                    + '<button onclick="testUrl(' + i + ')" class="flex items-center justify-center w-6 h-6 rounded text-slate-300 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors" title="测试">'
-                    + '<span class="icon-container" style="width:18px;height:18px" data-icon="link"></span></button>'
+                    + ((status === 'slow' || status === 'failed') ? '<button onclick="restoreUrl(' + i + ')" class="flex items-center justify-center w-6 h-6 rounded text-slate-300 hover:text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-500/10 transition-colors" title="恢复正常"><span class="icon-container" style="width:18px;height:18px" data-icon="play"></span></button>' : '')
+                    + '<button onclick="removeUrl(' + i + ')" class="flex items-center justify-center w-6 h-6 rounded text-slate-300 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-500/10 transition-colors" title="删除"><span class="icon-container" style="width:18px;height:18px" data-icon="trash"></span></button>'
+                    + '<button onclick="testUrl(' + i + ')" class="flex items-center justify-center w-6 h-6 rounded text-slate-300 hover:text-blue-500 hover:bg-blue-50 dark:hover:bg-blue-500/10 transition-colors" title="测试"><span class="icon-container" style="width:18px;height:18px" data-icon="link"></span></button>'
                     + '</span>';
                 box.appendChild(row);
             });
@@ -647,7 +711,7 @@
             input.addEventListener('blur', function() {
                 var val = input.value.trim();
                 if (val) {
-                    currentUrls.push(val);
+                    currentUrls.push({ url: val, status: 'unknown', attempts: 0 });
                     urlTestStatus[val] = undefined;
                     renderUrlList();
                     saveUrlsToServer();
@@ -662,6 +726,20 @@
             currentUrls.splice(idx, 1);
             renderUrlList();
             saveUrlsToServer();
+        }
+
+        async function restoreUrl(idx) {
+            var item = currentUrls[idx];
+            if (!item) return;
+            try {
+                var res = await fetch('/api/restore_url?url=' + encodeURIComponent(item.url), { method: 'POST' });
+                var data = await res.json();
+                if (data.ok) {
+                    item.status = 'normal';
+                    item.attempts = 0;
+                    renderUrlList();
+                } else { showToast('恢复失败'); }
+            } catch(e) { showToast('网络错误'); }
         }
 
         var _saveUrlsTimer = null;
@@ -679,8 +757,9 @@
         }
 
         async function testUrl(idx) {
-            var url = currentUrls[idx];
-            if (!url) return;
+            var item = currentUrls[idx];
+            if (!item) return;
+            var url = item.url;
             urlTestStatus[url] = 'testing';
             renderUrlList();
             try {
@@ -690,8 +769,15 @@
                 clearTimeout(timer);
                 var data = await res.json();
                 urlTestStatus[url] = data.ok ? 'ok' : 'fail';
+                // 同步单项状态（与后端 applyTestResult 一致），不重置整个 currentUrls 以免覆盖未保存的本地修改
+                if (data.ok) {
+                    if (item.status === 'failed' || item.status === 'unknown') item.status = 'normal';
+                } else {
+                    if (item.status === 'normal' || item.status === 'unknown') item.status = 'failed';
+                }
             } catch(e) {
                 urlTestStatus[url] = 'fail';
+                if (item.status === 'normal' || item.status === 'unknown') item.status = 'failed';
             }
             renderUrlList();
         }
@@ -700,6 +786,52 @@
             for (var i = 0; i < currentUrls.length; i++) {
                 await testUrl(i);
             }
+        }
+
+        // 导出全部源为 JSON 文件
+        function exportUrls() {
+            if (currentUrls.length === 0) { showToast('暂无地址可导出'); return; }
+            var data = JSON.stringify(currentUrls, null, 2);
+            var blob = new Blob([data], { type: 'application/json' });
+            var a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'downonly-urls-' + todayStr() + '.json';
+            a.click();
+            URL.revokeObjectURL(a.href);
+        }
+
+        // 批量导入：解析 JSON 数组，状态强制 unknown，对已有 URL 去重追加
+        function importUrls() {
+            var input = document.createElement('input');
+            input.type = 'file';
+            input.accept = 'application/json,.json';
+            input.onchange = function() {
+                var file = input.files[0];
+                if (!file) return;
+                var reader = new FileReader();
+                reader.onload = function() {
+                    try {
+                        var arr = JSON.parse(reader.result);
+                        if (!Array.isArray(arr)) { showToast('文件格式错误：需要 JSON 数组'); return; }
+                        var existing = {}; currentUrls.forEach(function(u) { existing[u.url] = true; });
+                        var added = 0, skipped = 0;
+                        arr.forEach(function(item) {
+                            var u = (typeof item === 'string') ? item : item.url;
+                            if (!u || typeof u !== 'string') { skipped++; return; }
+                            u = u.trim();
+                            if (!u || existing[u]) { skipped++; return; }
+                            existing[u] = true;
+                            currentUrls.push({ url: u, status: 'unknown', attempts: 0 });
+                            added++;
+                        });
+                        renderUrlList();
+                        saveUrlsToServer();
+                        showToast('已导入 ' + added + ' 条，跳过 ' + skipped + ' 条重复/无效');
+                    } catch(e) { showToast('解析失败：' + e.message); }
+                };
+                reader.readAsText(file);
+            };
+            input.click();
         }
 
         async function loadUrls() {
