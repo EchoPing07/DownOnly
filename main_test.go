@@ -2,9 +2,26 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// chdirTemp 切换到临时目录并返回还原函数（测试串行执行，无并行冲突）
+func chdirTemp(t *testing.T) string {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	dir := t.TempDir()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(old) })
+	return dir
+}
 
 // TestConfigUnmarshalLegacyURLs 验证旧版 urls([]string) 自动迁移为 URLEntry，状态标 unknown
 func TestConfigUnmarshalLegacyURLs(t *testing.T) {
@@ -232,6 +249,10 @@ func TestFindURLEntry(t *testing.T) {
 // 通过 → failed/unknown→normal，slow 不变（不可洗白）
 // 失败 → normal/unknown→failed，slow/failed 不变
 func TestApplyTestResult(t *testing.T) {
+	// applyTestResult 内部 saveConfig 写相对路径 data/config.json，
+	// 必须隔离到临时目录，否则覆盖仓库真实用户数据
+	chdirTemp(t)
+	os.MkdirAll(dataDir, 0755)
 	cases := []struct {
 		name   string
 		before string
@@ -319,5 +340,186 @@ func TestStatusMergeOnConfigPOST(t *testing.T) {
 		if g.status != w.status || g.attempts != w.attempts {
 			t.Errorf("%s: got {status=%s att=%d}, want {status=%s att=%d}", url, g.status, g.attempts, w.status, w.attempts)
 		}
+	}
+}
+
+// TestFixConfigSleepZero 回归：validateConfig 允许 sleep 区间为 0（连续下载），
+// fixConfig 不得把合法的 0 强制改回默认值（旧代码 <=0 → 10 导致 0 无法生效）
+func TestFixConfigSleepZero(t *testing.T) {
+	app := &App{}
+	app.config = Config{
+		SpeedLimitMbps:  5,
+		SleepMinMinutes: 0, SleepMaxMinutes: 0,
+		ScheduleStart: "00:00", ScheduleEnd: "23:59",
+	}
+	app.fixConfig()
+	if app.config.SleepMinMinutes != 0 || app.config.SleepMaxMinutes != 0 {
+		t.Errorf("sleep 0/0 should be preserved, got %d/%d",
+			app.config.SleepMinMinutes, app.config.SleepMaxMinutes)
+	}
+
+	app.config.SleepMinMinutes = -5
+	app.config.SleepMaxMinutes = -1
+	app.fixConfig()
+	if app.config.SleepMinMinutes != 10 || app.config.SleepMaxMinutes != 20 {
+		t.Errorf("negative sleep should be corrected to 10/20, got %d/%d",
+			app.config.SleepMinMinutes, app.config.SleepMaxMinutes)
+	}
+
+	app.config.SleepMinMinutes = 30
+	app.config.SleepMaxMinutes = 10
+	app.fixConfig()
+	if app.config.SleepMaxMinutes != 30 {
+		t.Errorf("sleep max < min should clamp to min, got %d", app.config.SleepMaxMinutes)
+	}
+}
+
+// TestValidateConfigSleepZero 验证 0/0 通过整体配置校验
+func TestValidateConfigSleepZero(t *testing.T) {
+	cfg := Config{
+		SpeedLimitMbps: 5, SlowSwitchThreshold: 60, SlowSwitchMaxAttempts: 3,
+		DailyQuotaMinGB: 100, DailyQuotaMaxGB: 200,
+		ScheduleStart: "00:00", ScheduleEnd: "23:59",
+		SleepMinMinutes: 0, SleepMaxMinutes: 0,
+	}
+	if err := validateConfig(cfg); err != nil {
+		t.Errorf("sleep 0/0 should validate, got %v", err)
+	}
+}
+
+// TestIsAllowedURLEdges 覆盖 SSRF 校验边界：未指定地址/环回/链路本地/协议白名单/公网 IP
+func TestIsAllowedURLEdges(t *testing.T) {
+	denied := []string{
+		"http://0.0.0.0/x",           // Linux 上等价连接本机，曾漏判
+		"http://127.0.0.1/x",
+		"http://localhost/x",
+		"http://[::1]/x",
+		"http://169.254.169.254/x",   // 云元数据
+		"http://192.168.1.1/x",
+		"http://10.0.0.1/x",
+		"http://172.16.0.1/x",
+		"http://[fe80::1]/x",
+		"ftp://8.8.8.8/x",            // 非 HTTP(S)
+		"file:///etc/passwd",
+		"/relative/path",
+	}
+	for _, u := range denied {
+		if ok, _ := isAllowedURL(u); ok {
+			t.Errorf("isAllowedURL(%q) = true, want false", u)
+		}
+	}
+	if ok, transient := isAllowedURL("http://8.8.8.8/x"); !ok || transient {
+		t.Errorf("isAllowedURL(public IP) = (%v, %v), want (true, false)", ok, transient)
+	}
+}
+
+// TestLoadConfigFirstRun 回归：首次运行（无 config.json）也必须走 fixConfig，
+// 否则 currentSpeedLimit 保持 0，doDownload 中 bytesPerSec=0 会导致节流计算异常
+func TestLoadConfigFirstRun(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(dataDir, 0755) // main() 在 loadConfig 前创建数据目录
+	app := &App{}
+	app.loadConfig()
+	if got := app.currentSpeedLimit.Load(); got != int64(app.config.SpeedLimitMbps) {
+		t.Errorf("currentSpeedLimit = %d, want %d", got, app.config.SpeedLimitMbps)
+	}
+	if len(app.config.URLs) == 0 {
+		t.Error("first run should get default URL list")
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "config.json")); err != nil {
+		t.Errorf("config.json should be created on first run: %v", err)
+	}
+}
+
+// TestLoadConfigCorruptBackup 回归：config.json 损坏时应备份原文件再回退默认值，
+// 不允许直接用空配置覆盖写盘导致用户源列表永久丢失
+func TestLoadConfigCorruptBackup(t *testing.T) {
+	dir := chdirTemp(t)
+	os.MkdirAll(dataDir, 0755)
+	if err := os.WriteFile(filepath.Join(dataDir, "config.json"), []byte(`{"urls": [broken`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{config: Config{URLs: []URLEntry{{URL: "http://user-saved"}}}}
+	app.loadConfig()
+
+	// 回退到默认配置而非零值
+	if len(app.config.URLs) == 0 || app.config.URLs[0].URL == "http://user-saved" {
+		t.Errorf("corrupt config should fall back to defaults, got %+v", app.config.URLs)
+	}
+	// 损坏文件被备份而非覆盖
+	backups, _ := filepath.Glob(filepath.Join(dir, dataDir, "config.json.corrupt-*"))
+	if len(backups) != 1 {
+		t.Fatalf("expected 1 corrupt backup, got %d", len(backups))
+	}
+	// 重新生成的 config.json 是合法 JSON
+	data, err := os.ReadFile(filepath.Join(dataDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c Config
+	if err := json.Unmarshal(data, &c); err != nil {
+		t.Errorf("rewritten config.json is not valid JSON: %v", err)
+	}
+}
+
+// TestLoadStatsCorruptBackup 验证 stats.json 损坏同样备份后重置
+func TestLoadStatsCorruptBackup(t *testing.T) {
+	dir := chdirTemp(t)
+	os.MkdirAll(dataDir, 0755)
+	os.WriteFile(filepath.Join(dataDir, "stats.json"), []byte(`{bad json`), 0600)
+	app := &App{}
+	app.loadStats()
+	if app.stats.Daily == nil || app.stats.TodayDate == "" {
+		t.Errorf("stats should reset to defaults, got %+v", app.stats)
+	}
+	backups, _ := filepath.Glob(filepath.Join(dir, dataDir, "stats.json.corrupt-*"))
+	if len(backups) != 1 {
+		t.Fatalf("expected 1 corrupt backup, got %d", len(backups))
+	}
+}
+
+// TestLoadConfigZeroedSelfHeals 回归：config.json 被测试污染成全零/空时间后，
+// loadConfig+fixConfig 必须把配置修复到能通过 validateConfig 的状态，
+// 否则 GET /api/config 返回的配置无法通过 POST 自身校验，
+// 前端"添加地址"整体回传配置时被 400 拒绝且静默失败
+func TestLoadConfigZeroedSelfHeals(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(dataDir, 0755)
+	zeroed := `{
+		"speed_limit_mbps": 0, "min_speed_mbps": 0,
+		"slow_switch_threshold": 0, "slow_switch_max_attempts": 0,
+		"daily_quota_min_gb": 0, "daily_quota_max_gb": 0,
+		"schedule_start": "", "schedule_end": "",
+		"sleep_min_minutes": 0, "sleep_max_minutes": 0,
+		"urls": [{"url": "http://x", "status": "failed", "attempts": 1}]
+	}`
+	if err := os.WriteFile(filepath.Join(dataDir, "config.json"), []byte(zeroed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	app.loadConfig()
+	if err := validateConfig(app.config); err != nil {
+		t.Fatalf("被污染配置加载后应自愈并通过校验: %v", err)
+	}
+	if app.config.ScheduleStart != "00:00" || app.config.ScheduleEnd != "23:59" {
+		t.Errorf("schedule = %q-%q, want 00:00-23:59",
+			app.config.ScheduleStart, app.config.ScheduleEnd)
+	}
+}
+
+// TestWriteFileAtomic 验证原子写内容完整且不残留临时文件
+func TestWriteFileAtomic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.json")
+	if err := writeFileAtomic(path, []byte(`{"k":1}`), 0600); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != `{"k":1}` {
+		t.Errorf("content mismatch: %q, %v", data, err)
+	}
+	leftovers, _ := filepath.Glob(filepath.Join(dir, ".test.json.tmp-*"))
+	if len(leftovers) != 0 {
+		t.Errorf("temp files leaked: %v", leftovers)
 	}
 }

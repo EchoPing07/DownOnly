@@ -7,7 +7,7 @@
     <link rel="icon" type="image/svg+xml" href="icons/logo.svg">
     <script>(function(){var t=localStorage.getItem('downonly-theme');if(t==='dark'||(!t&&window.matchMedia('(prefers-color-scheme:dark)').matches)){document.documentElement.classList.add('dark')}})();</script>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="/vendor/chart.umd.js"></script>
     <script>
         tailwind.config = {
             darkMode: 'class',
@@ -506,10 +506,12 @@
                 clearInputError(document.getElementById(id));
             });
 
-            var speedMbps = parseInt(document.getElementById('conf-speed').value) || 5;
+            // parseInt 不带 || 兜底：空输入/非法输入保留 NaN，交由下方校验报错，
+            // 避免静默写入默认值绕过校验
+            var speedMbps = parseInt(document.getElementById('conf-speed').value);
             var minSpeed = parseInt(document.getElementById('conf-minspeed').value) || 0;
-            var slowThreshold = parseInt(document.getElementById('conf-slow-threshold').value) || 60;
-            var slowAttempts = parseInt(document.getElementById('conf-slow-attempts').value) || 3;
+            var slowThreshold = parseInt(document.getElementById('conf-slow-threshold').value);
+            var slowAttempts = parseInt(document.getElementById('conf-slow-attempts').value);
             var quotaMin = parseInt(document.getElementById('conf-quota-min').value);
             var quotaMax = parseInt(document.getElementById('conf-quota-max').value);
             var scheduleStart = document.getElementById('conf-start').value || '00:00';
@@ -576,8 +578,9 @@
                 daily_quota_max_gb: quotaMax,
                 schedule_start: scheduleStart,
                 schedule_end: scheduleEnd,
-                sleep_min_minutes: sleepMin || 10,
-                sleep_max_minutes: sleepMax || 20,
+                // 休息间隔在禁用时不参与校验，NaN 会序列化成 null，这里给回合法默认值
+                sleep_min_minutes: sleepDisabled ? 10 : sleepMin,
+                sleep_max_minutes: sleepDisabled ? 20 : sleepMax,
                 sleep_disabled: sleepDisabled,
                 urls: currentUrls,
                 allow_public_access: document.getElementById('conf-allow-public').dataset.on === 'true'
@@ -748,11 +751,15 @@
             _saveUrlsTimer = setTimeout(async function() {
                 try {
                     var res = await fetch('/api/config');
-                    if (!res.ok) return;
+                    if (!res.ok) { showToast('获取配置失败，地址未保存'); return; }
                     var cfg = await res.json();
                     cfg.urls = currentUrls.slice();
-                    await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
-                } catch(e) {}
+                    var res2 = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+                    var data = {};
+                    try { data = await res2.json(); } catch(e) {}
+                    // 不再静默吞错：保存被拒时提示原因，列表保留待重试
+                    if (!data.ok) { showToast(data.error || '地址保存失败'); }
+                } catch(e) { showToast('网络错误，地址未保存'); }
             }, 300);
         }
 

@@ -22,6 +22,11 @@ jobs:
           go-version: '1.22'
           cache: false
 
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test -race ./...
+
       # 1. 编译二进制文件（文件名统一用下划线 _）
       - name: Build binaries
         run: |

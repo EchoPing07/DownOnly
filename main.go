@@ -31,6 +31,9 @@ var indexHTML []byte
 //go:embed icons
 var iconsFS embed.FS
 
+//go:embed vendor/chart.umd.js
+var chartJS []byte
+
 const dataDir = "data"
 
 var logsDir = filepath.Join(dataDir, "logs")
@@ -170,25 +173,43 @@ type App struct {
 
 // --- 持久化：配置 ---
 
-// loadConfig 从 config.json 加载配置，文件不存在时使用默认值
-func (app *App) loadConfig() {
-	data, err := os.ReadFile(filepath.Join(dataDir, "config.json"))
-	if err != nil {
-		app.config = Config{
-			SpeedLimitMbps: 5, MinSpeedMbps: 0, SlowSwitchThreshold: 60, SlowSwitchMaxAttempts: 3,
-			DailyQuotaMinGB: 150, DailyQuotaMaxGB: 200,
-			ScheduleStart: "00:00", ScheduleEnd: "23:59",
-			SleepMinMinutes: 10, SleepMaxMinutes: 20,
-			AllowPublicAccess: false,
-			URLs: []URLEntry{{URL: "http://updates-http.cdn-apple.com/2019WinterFCS/fullrestores/041-39257/32129B6C-292C-11E9-9E72-4511412B0A59/iPhone_4.7_12.1.4_16D57_Restore.ipsw", Status: statusUnknown}},
-		}
-		app.saveConfig()
+// defaultConfig 返回出厂默认配置
+func defaultConfig() Config {
+	return Config{
+		SpeedLimitMbps: 5, MinSpeedMbps: 0, SlowSwitchThreshold: 60, SlowSwitchMaxAttempts: 3,
+		DailyQuotaMinGB: 150, DailyQuotaMaxGB: 200,
+		ScheduleStart: "00:00", ScheduleEnd: "23:59",
+		SleepMinMinutes: 10, SleepMaxMinutes: 20,
+		AllowPublicAccess: false,
+		URLs: []URLEntry{{URL: "http://updates-http.cdn-apple.com/2019WinterFCS/fullrestores/041-39257/32129B6C-292C-11E9-9E72-4511412B0A59/iPhone_4.7_12.1.4_16D57_Restore.ipsw", Status: statusUnknown}},
+	}
+}
+
+// backupCorruptFile 把无法解析的持久化文件改名备份，避免回退默认值后被覆盖写盘丢失用户数据
+func backupCorruptFile(path string) {
+	bak := path + ".corrupt-" + time.Now().Format("20060102-150405")
+	if err := os.Rename(path, bak); err != nil {
+		log.Printf("损坏文件备份失败: %v", err)
 		return
 	}
-	if err := json.Unmarshal(data, &app.config); err != nil {
-		log.Printf("配置文件解析失败: %v", err)
+	log.Printf("已备份损坏文件: %s", bak)
+}
+
+// loadConfig 从 config.json 加载配置，文件不存在或损坏时使用默认值（损坏文件先备份）
+func (app *App) loadConfig() {
+	data, err := os.ReadFile(filepath.Join(dataDir, "config.json"))
+	if err == nil {
+		if err := json.Unmarshal(data, &app.config); err != nil {
+			log.Printf("配置文件解析失败: %v", err)
+			backupCorruptFile(filepath.Join(dataDir, "config.json"))
+		} else {
+			app.fixConfig()
+			return
+		}
 	}
+	app.config = defaultConfig()
 	app.fixConfig()
+	app.saveConfig()
 }
 
 // fixConfig 修正非法配置值并同步速率限制到原子变量
@@ -202,10 +223,18 @@ func (app *App) fixConfig() {
 	if app.config.DailyQuotaMinGB <= 0 { app.config.DailyQuotaMinGB = 150 }
 	if app.config.DailyQuotaMaxGB <= 0 { app.config.DailyQuotaMaxGB = 200 }
 	if app.config.DailyQuotaMaxGB < app.config.DailyQuotaMinGB { app.config.DailyQuotaMaxGB = app.config.DailyQuotaMinGB }
-	if app.config.SleepMinMinutes <= 0 { app.config.SleepMinMinutes = 10 }
-	if app.config.SleepMaxMinutes <= 0 { app.config.SleepMaxMinutes = 20 }
+	// sleep 区间允许 0（连续下载），仅修正负值；validateConfig 已保证 min<=max
+	if app.config.SleepMinMinutes < 0 { app.config.SleepMinMinutes = 10 }
+	if app.config.SleepMaxMinutes < 0 { app.config.SleepMaxMinutes = 20 }
 	if app.config.SleepMaxMinutes < app.config.SleepMinMinutes { app.config.SleepMaxMinutes = app.config.SleepMinMinutes }
-	// 修正 URL 条目状态默认值
+	// 时间字段兜底：被污染/手改的 config.json 可能带空串或非法时间，
+	// 修复到合法值保证 GET /api/config 返回的配置能通过 POST 自身校验（回环自洽），
+	// 否则前端整体回传配置（如添加地址）会被 400 拒绝
+	if !validateTimeStr(app.config.ScheduleStart) { app.config.ScheduleStart = "00:00" }
+	if !validateTimeStr(app.config.ScheduleEnd) { app.config.ScheduleEnd = "23:59" }
+	if app.config.ScheduleStart == app.config.ScheduleEnd {
+		app.config.ScheduleStart, app.config.ScheduleEnd = "00:00", "23:59"
+	}
 	for i := range app.config.URLs {
 		if app.config.URLs[i].URL == "" { continue }
 		s := app.config.URLs[i].Status
@@ -268,18 +297,30 @@ func validateConfig(cfg Config) error {
 	return nil
 }
 
+// writeFileAtomic 先写同目录临时文件再替换，避免断电/磁盘满导致目标文件截断损坏
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil { return err }
+	name := tmp.Name()
+	if _, err := tmp.Write(data); err != nil { tmp.Close(); os.Remove(name); return err }
+	if err := tmp.Close(); err != nil { os.Remove(name); return err }
+	if err := os.Chmod(name, perm); err != nil { os.Remove(name); return err }
+	if err := os.Rename(name, path); err != nil { os.Remove(name); return err }
+	return nil
+}
+
 // saveConfig 持久化配置到 config.json
 func (app *App) saveConfig() {
 	data, err := json.MarshalIndent(app.config, "", "  ")
 	if err != nil { log.Printf("配置序列化失败: %v", err); return }
-	if err := os.WriteFile(filepath.Join(dataDir, "config.json"), data, 0600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dataDir, "config.json"), data, 0600); err != nil {
 		log.Printf("配置文件写入失败: %v", err)
 	}
 }
 
 // --- 持久化：流量统计 ---
 
-// loadStats 从 stats.json 加载流量统计
+// loadStats 从 stats.json 加载流量统计，文件损坏时备份后重置
 func (app *App) loadStats() {
 	data, err := os.ReadFile(filepath.Join(dataDir, "stats.json"))
 	if err != nil {
@@ -288,6 +329,9 @@ func (app *App) loadStats() {
 	}
 	if err := json.Unmarshal(data, &app.stats); err != nil {
 		log.Printf("统计数据解析失败: %v", err)
+		backupCorruptFile(filepath.Join(dataDir, "stats.json"))
+		app.stats = Stats{Daily: make(map[string]uint64), TodayDate: time.Now().Format("2006-01-02")}
+		return
 	}
 	if app.stats.Daily == nil { app.stats.Daily = make(map[string]uint64) }
 }
@@ -296,7 +340,7 @@ func (app *App) loadStats() {
 func (app *App) saveStats() {
 	data, err := json.MarshalIndent(app.stats, "", "  ")
 	if err != nil { log.Printf("统计序列化失败: %v", err); return }
-	if err := os.WriteFile(filepath.Join(dataDir, "stats.json"), data, 0600); err != nil {
+	if err := writeFileAtomic(filepath.Join(dataDir, "stats.json"), data, 0600); err != nil {
 		log.Printf("统计文件写入失败: %v", err)
 	}
 }
@@ -324,7 +368,7 @@ func (app *App) saveTodayLogs() {
 	if len(app.todayLogs) == 0 { return }
 	data, err := json.MarshalIndent(map[string]interface{}{"entries": app.todayLogs}, "", "  ")
 	if err != nil { log.Printf("日志序列化失败: %v", err); return }
-	if err := os.WriteFile(app.logFilePath(app.todayLogsDate), data, 0600); err != nil {
+	if err := writeFileAtomic(app.logFilePath(app.todayLogsDate), data, 0600); err != nil {
 		log.Printf("日志文件写入失败: %v", err)
 	}
 }
@@ -521,22 +565,29 @@ func (app *App) downloadWorker() {
 		}
 		sleepMin := app.config.SleepMinMinutes; sleepMax := app.config.SleepMaxMinutes
 		sleepDisabled := app.config.SleepDisabled
+		urlCount := len(app.config.URLs)
 		app.mu.Unlock()
 
 		// 单源时重试一次，多源不重试（由选源轮换覆盖）
 		maxTries := 1
-		if len(app.config.URLs) == 1 { maxTries = 2 }
+		if urlCount == 1 { maxTries = 2 }
 
 		var succeeded bool
 		var slowSwitched bool
 		for try := 0; try < maxTries; try++ {
 			if !app.isRunning.Load() { break }
 			u := entry.URL
-			if !isAllowedURL(u) {
+			allowed, transient := isAllowedURL(u)
+			if !allowed {
 				app.mu.Lock()
-				app.addLog("URL 不安全，已跳过: " + u)
-				if e := app.findURLEntry(u); e != nil { e.Status = statusFailed }
-				app.saveConfig()
+				if transient {
+					// DNS 瞬时失败：只跳过本轮，不持久化 failed，避免网络抖动误杀源
+					app.addLog("暂时无法解析域名，本轮跳过: " + u)
+				} else {
+					app.addLog("URL 不安全，已跳过: " + u)
+					if e := app.findURLEntry(u); e != nil { e.Status = statusFailed }
+					app.saveConfig()
+				}
 				app.mu.Unlock()
 				break
 			}
@@ -626,9 +677,16 @@ func (app *App) downloadWorker() {
 // doDownload 执行单次 HTTP 下载，按速率限制节流并累计流量。
 // 检测到 shouldSwitch（判定器置位）时返回 errSlowSwitch，由 worker 走切换分支。
 func (app *App) doDownload(url string) (uint64, error) {
+	// 不设 Client.Timeout：它覆盖含读 body 的端到端总时长，大文件 × 低限速（如 3GB @ 2Mbps）
+	// 会被整体误杀并把源标 failed。连接/握手/等首包各有超时，body 读取由调度/限额/shouldStop 控制。
 	client := &http.Client{
-		Timeout:   2 * time.Hour,
-		Transport: &http.Transport{IdleConnTimeout: 90 * time.Second, DisableKeepAlives: false},
+		Transport: &http.Transport{
+			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+			DisableKeepAlives:     false,
+		},
 	}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil { return 0, err }
@@ -850,17 +908,26 @@ func (app *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 // 测试结果同步更新 URL 状态：通过则 failed/unknown→normal（slow 不变）；失败则 normal/unknown→failed（slow/failed 不变）。
 func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
 	rawURL := r.URL.Query().Get("url")
-	if rawURL == "" || !isAllowedURL(rawURL) {
+	respondTest := func(ok bool) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
+		json.NewEncoder(w).Encode(map[string]bool{"ok": ok})
+	}
+	if rawURL == "" {
+		respondTest(false)
+		return
+	}
+	allowed, transient := isAllowedURL(rawURL)
+	if !allowed {
+		// DNS 瞬时失败不改持久化状态，避免一次网络抖动把源洗成 failed
+		if !transient { app.applyTestResult(rawURL, false) }
+		respondTest(false)
 		return
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		app.applyTestResult(rawURL, false)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
+		respondTest(false)
 		return
 	}
 	req.Header.Set("Range", "bytes=0-0")
@@ -868,16 +935,14 @@ func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
 	resp, err := client.Do(req)
 	if err != nil {
 		app.applyTestResult(rawURL, false)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]bool{"ok": false})
+		respondTest(false)
 		return
 	}
 	io.Copy(io.Discard, resp.Body)
 	resp.Body.Close()
 	ok := resp.StatusCode >= 200 && resp.StatusCode < 400
 	app.applyTestResult(rawURL, ok)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]bool{"ok": ok})
+	respondTest(ok)
 }
 
 // applyTestResult 根据测试结果更新单个 URL 的持久化状态
@@ -971,9 +1036,9 @@ func (app *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 // --- 安全工具 ---
 
-// isPrivateIP 判断 IP 是否为私有/保留地址（RFC 1918、环回、链路本地等）
+// isPrivateIP 判断 IP 是否为私有/保留地址（RFC 1918、环回、链路本地、未指定地址等）
 func isPrivateIP(ip net.IP) bool {
-	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
 		return true
 	}
 	for _, cidr := range privateCIDRs {
@@ -993,9 +1058,15 @@ func getRemoteIP(r *http.Request) string {
 	return host
 }
 
-// blockPublicMiddleware 公网访问拦截中间件，未开启公网访问时仅允许私有地址
+// blockPublicMiddleware 公网访问拦截中间件，未开启公网访问时仅允许私有地址；
+// 同时拒绝浏览器跨站请求（Sec-Fetch-Site: cross-site），防止恶意网页借局域网内
+// 受害者浏览器 CSRF 修改配置/开启公网访问。非浏览器客户端不带该头，不受影响。
 func (app *App) blockPublicMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
 		app.mu.Lock()
 		allow := app.config.AllowPublicAccess
 		app.mu.Unlock()
@@ -1010,33 +1081,34 @@ func (app *App) blockPublicMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// isAllowedURL 校验下载地址安全性：仅允许公网 HTTP(S)，防止 SSRF 攻击
-func isAllowedURL(rawURL string) bool {
+// isAllowedURL 校验下载地址安全性：仅允许公网 HTTP(S)，防止 SSRF 攻击。
+// transient=true 表示仅因 DNS 暂时失败无法判定，调用方不应据此持久化 failed 状态。
+func isAllowedURL(rawURL string) (ok, transient bool) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
-		return false
+		return false, false
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
-		return false
+		return false, false
 	}
 	hostname := u.Hostname()
 	if hostname == "" {
-		return false
+		return false, false
 	}
 	if hostname == "localhost" || hostname == "[::1]" {
-		return false
+		return false, false
 	}
 	ip := net.ParseIP(hostname)
 	if ip != nil {
-		return !isPrivateIP(ip)
+		return !isPrivateIP(ip), false
 	}
 	// DNS 解析后检查所有 IP，防止 DNS Rebinding 绕过
 	ips, err := net.LookupIP(hostname)
-	if err != nil { return false }
+	if err != nil { return false, true }
 	for _, ip := range ips {
-		if isPrivateIP(ip) { return false }
+		if isPrivateIP(ip) { return false, false }
 	}
-	return true
+	return true, false
 }
 
 // --- 工具函数 ---
@@ -1063,7 +1135,7 @@ func main() {
 
 	app := &App{
 		status:        "stopped",
-		speedHistory:  make([]float64, 60),
+		speedHistory:  make([]float64, 0, 60),
 		todayLogsDate: time.Now().Format("2006-01-02"),
 	}
 
@@ -1109,6 +1181,12 @@ func main() {
 	http.HandleFunc("/api/config", app.blockPublicMiddleware(app.handleConfig))
 	http.HandleFunc("/api/test_url", app.blockPublicMiddleware(app.handleTestURL))
 	http.HandleFunc("/api/restore_url", app.blockPublicMiddleware(app.handleRestoreURL))
+
+	http.HandleFunc("/vendor/chart.umd.js", app.blockPublicMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "public, max-age=604800")
+		w.Write(chartJS)
+	}))
 
 	http.HandleFunc("/icons/", app.blockPublicMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimPrefix(r.URL.Path, "/icons/")
