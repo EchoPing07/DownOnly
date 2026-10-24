@@ -1,6 +1,8 @@
 ﻿package main
 
 import (
+	"bufio"
+	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -15,7 +17,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
-	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -169,6 +170,26 @@ type App struct {
 	shouldSwitch          atomic.Bool // 判定器置位 → doDownload 中断切源
 	sessionSlowTriggered  bool         // 本次下载期间是否触发过慢判定
 	noCandidateNotified   bool         // 无候选日志去重
+
+	// 持久化去重快照（mu 保护）：序列化结果与上次落盘一致时跳过写盘，消除无效写放大
+	configSaved []byte
+	statsSaved  []byte
+
+	// 当日日志文件（mu 保护）：JSONL 追加写，惰性打开，日期切换/退出时关闭
+	logFile *os.File
+	logBuf  *bufio.Writer
+	logEnc  *json.Encoder
+
+	// 下载进度日志聚合（mu 保护）：同源连续完成的"下载完成"合并输出，避免高频小文件刷屏
+	progress struct {
+		url       string
+		count     int
+		bytes     uint64
+		lastFlush time.Time
+	}
+
+	lastDNSSkipLog time.Time // "暂时无法解析域名"日志限频（mu 保护）
+	lastLogFileErr time.Time // 日志文件错误限频（mu 保护）
 }
 
 // --- 持久化：配置 ---
@@ -204,6 +225,8 @@ func (app *App) loadConfig() {
 			backupCorruptFile(filepath.Join(dataDir, "config.json"))
 		} else {
 			app.fixConfig()
+			// 快照对齐磁盘内容：配置未变时后续 saveConfig 全部跳过（fixConfig 有修正时下次写盘顺带归一化）
+			app.configSaved = append(app.configSaved[:0], data...)
 			return
 		}
 	}
@@ -309,13 +332,16 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	return nil
 }
 
-// saveConfig 持久化配置到 config.json
+// saveConfig 持久化配置到 config.json；序列化结果与上次落盘一致时直接跳过，
+// 消除下载热循环中"状态未变也重写"的无效写盘（issue #13 主因之一）
 func (app *App) saveConfig() {
 	data, err := json.MarshalIndent(app.config, "", "  ")
 	if err != nil { log.Printf("配置序列化失败: %v", err); return }
+	if bytes.Equal(data, app.configSaved) { return }
 	if err := writeFileAtomic(filepath.Join(dataDir, "config.json"), data, 0600); err != nil {
-		log.Printf("配置文件写入失败: %v", err)
+		log.Printf("配置文件写入失败: %v", err); return
 	}
+	app.configSaved = append(app.configSaved[:0], data...)
 }
 
 // --- 持久化：流量统计 ---
@@ -323,64 +349,202 @@ func (app *App) saveConfig() {
 // loadStats 从 stats.json 加载流量统计，文件损坏时备份后重置
 func (app *App) loadStats() {
 	data, err := os.ReadFile(filepath.Join(dataDir, "stats.json"))
-	if err != nil {
-		app.stats = Stats{Daily: make(map[string]uint64), TodayDate: time.Now().Format("2006-01-02")}
-		return
+	if err == nil {
+		if err := json.Unmarshal(data, &app.stats); err != nil {
+			log.Printf("统计数据解析失败: %v", err)
+			backupCorruptFile(filepath.Join(dataDir, "stats.json"))
+		} else {
+			if app.stats.Daily == nil { app.stats.Daily = make(map[string]uint64) }
+			app.statsSaved = append(app.statsSaved[:0], data...) // 快照对齐磁盘内容
+			return
+		}
 	}
-	if err := json.Unmarshal(data, &app.stats); err != nil {
-		log.Printf("统计数据解析失败: %v", err)
-		backupCorruptFile(filepath.Join(dataDir, "stats.json"))
-		app.stats = Stats{Daily: make(map[string]uint64), TodayDate: time.Now().Format("2006-01-02")}
-		return
-	}
-	if app.stats.Daily == nil { app.stats.Daily = make(map[string]uint64) }
+	app.stats = Stats{Daily: make(map[string]uint64), TodayDate: time.Now().Format("2006-01-02")}
 }
 
-// saveStats 持久化流量统计到 stats.json
+// saveStats 持久化流量统计到 stats.json；内容与上次落盘一致时直接跳过
 func (app *App) saveStats() {
 	data, err := json.MarshalIndent(app.stats, "", "  ")
 	if err != nil { log.Printf("统计序列化失败: %v", err); return }
+	if bytes.Equal(data, app.statsSaved) { return }
 	if err := writeFileAtomic(filepath.Join(dataDir, "stats.json"), data, 0600); err != nil {
-		log.Printf("统计文件写入失败: %v", err)
+		log.Printf("统计文件写入失败: %v", err); return
 	}
+	app.statsSaved = append(app.statsSaved[:0], data...)
 }
 
-// --- 持久化：按天日志 ---
+// --- 持久化：按天日志（JSONL 追加写） ---
 
-// logFilePath 返回指定日期的日志文件路径
-func (app *App) logFilePath(date string) string {
+const (
+	logCap         = 1000        // 内存中保留的日志条数上限
+	progressWindow = time.Minute // 下载进度日志聚合窗口
+)
+
+// logFilePath 返回指定日期的日志文件路径（JSONL 追加格式）
+func logFilePath(date string) string {
+	return filepath.Join(logsDir, "log-"+date+".jsonl")
+}
+
+// legacyLogFilePath 旧版整文件 JSON 格式的日志文件路径（仅兼容读取）
+func legacyLogFilePath(date string) string {
 	return filepath.Join(logsDir, "log-"+date+".json")
 }
 
-// loadLogsFromFile 从指定日期的日志文件加载条目
-func (app *App) loadLogsFromFile(date string) []LogEntry {
-	data, err := os.ReadFile(app.logFilePath(date))
+// logDateOf 从日志文件名提取日期，兼容新版 .jsonl 与旧版 .json
+func logDateOf(name string) (string, bool) {
+	for _, suffix := range []string{".jsonl", ".json"} {
+		if strings.HasPrefix(name, "log-") && strings.HasSuffix(name, suffix) {
+			return strings.TrimSuffix(strings.TrimPrefix(name, "log-"), suffix), true
+		}
+	}
+	return "", false
+}
+
+// loadLogsFromFile 从指定日期的日志文件加载条目：优先 JSONL 追加格式（坏行仅跳过该行），
+// 兼容旧版整文件 JSON；返回最近 logCap 条。
+func loadLogsFromFile(date string) []LogEntry {
+	if data, err := os.ReadFile(logFilePath(date)); err == nil {
+		var entries []LogEntry
+		for _, line := range bytes.Split(data, []byte{'\n'}) {
+			var e LogEntry
+			if json.Unmarshal(line, &e) == nil && e.Time != "" {
+				entries = append(entries, e)
+			}
+		}
+		if len(entries) > logCap { return entries[len(entries)-logCap:] }
+		return entries
+	}
+	data, err := os.ReadFile(legacyLogFilePath(date))
 	if err != nil { return nil }
-	var result struct { Entries []LogEntry `json:"entries"` }
+	var result struct{ Entries []LogEntry `json:"entries"` }
 	if err := json.Unmarshal(data, &result); err != nil {
 		log.Printf("日志文件 %s 解析失败: %v", date, err)
+		return nil
 	}
+	if len(result.Entries) > logCap { return result.Entries[len(result.Entries)-logCap:] }
 	return result.Entries
 }
 
-// saveTodayLogs 持久化当日日志到文件
-func (app *App) saveTodayLogs() {
-	if len(app.todayLogs) == 0 { return }
-	data, err := json.MarshalIndent(map[string]interface{}{"entries": app.todayLogs}, "", "  ")
-	if err != nil { log.Printf("日志序列化失败: %v", err); return }
-	if err := writeFileAtomic(app.logFilePath(app.todayLogsDate), data, 0600); err != nil {
-		log.Printf("日志文件写入失败: %v", err)
+// addLog 追加日志条目到内存并直写当日 JSONL 文件（经 bufio 缓冲，由 autoSaver
+// 定期刷盘，崩溃最多丢缓冲内几条）。超出上限时淘汰最早的记录；
+// 事件日志会先冲掉聚合中的下载进度，保持时序。
+func (app *App) addLog(msg string) {
+	if app.progress.count > 0 { app.flushProgress() }
+	e := LogEntry{Time: time.Now().Format("15:04:05"), Msg: msg}
+	app.todayLogs = append(app.todayLogs, e)
+	if len(app.todayLogs) > logCap {
+		app.todayLogs = app.todayLogs[len(app.todayLogs)-logCap:]
+	}
+	if app.logEnc == nil { app.openLogFile() }
+	if app.logEnc != nil {
+		if err := app.logEnc.Encode(e); err != nil {
+			// 写入失败（如磁盘满，bufio 错误为粘性）：丢弃句柄，下次 addLog 重开重试，
+			// 否则当天文件日志会静默失效；失败条目仅保留在内存
+			app.logFileErr("日志写入失败", err)
+			app.dropLogFile()
+		}
 	}
 }
 
-// addLog 追加日志条目，超出上限时淘汰最早的记录
-func (app *App) addLog(msg string) {
-	app.todayLogs = append(app.todayLogs, LogEntry{
-		Time: time.Now().Format("15:04:05"),
-		Msg:  msg,
-	})
-	if len(app.todayLogs) > 1000 {
-		app.todayLogs = app.todayLogs[len(app.todayLogs)-1000:]
+// openLogFile 惰性打开当日日志文件（追加模式）；打开失败仅保留内存日志
+func (app *App) openLogFile() {
+	f, err := os.OpenFile(logFilePath(app.todayLogsDate), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		app.logFileErr("日志文件打开失败", err)
+		return
+	}
+	app.logFile = f
+	app.logBuf = bufio.NewWriter(f)
+	app.logEnc = json.NewEncoder(app.logBuf)
+}
+
+// logFileErr 日志文件错误限频记录（每分钟至多一条），避免磁盘故障时随 addLog 高频刷屏
+func (app *App) logFileErr(prefix string, err error) {
+	if time.Since(app.lastLogFileErr) > time.Minute {
+		app.lastLogFileErr = time.Now()
+		log.Printf("%s: %v", prefix, err)
+	}
+}
+
+// flushLogs 把缓冲中的日志条目刷入文件；失败则丢弃句柄，下次 addLog 重开重试
+func (app *App) flushLogs() {
+	if app.logBuf == nil { return }
+	if err := app.logBuf.Flush(); err != nil {
+		app.logFileErr("日志刷盘失败", err)
+		app.dropLogFile()
+	}
+}
+
+// dropLogFile 丢弃当前日志文件句柄（写入失败时使用），下次 addLog 重新打开
+func (app *App) dropLogFile() {
+	if app.logFile != nil { app.logFile.Close() }
+	app.logFile, app.logBuf, app.logEnc = nil, nil, nil
+}
+
+// closeLogFile 冲缓冲并关闭当前日志文件（日期切换/退出时调用，下次 addLog 重新打开）
+func (app *App) closeLogFile() {
+	if app.logFile == nil { return }
+	app.flushLogs()
+	app.dropLogFile()
+}
+
+// migrateLegacyTodayLog 把旧版整文件格式的当日日志一次性迁移为 JSONL 后删除旧文件。
+// 历史日期的旧文件保留只读，由 loadLogsFromFile 兼容读取、cleanOldLogs 统一清理。
+func (app *App) migrateLegacyTodayLog() {
+	data, err := os.ReadFile(legacyLogFilePath(app.todayLogsDate))
+	if err != nil { return }
+	var result struct{ Entries []LogEntry `json:"entries"` }
+	if json.Unmarshal(data, &result) != nil || len(result.Entries) == 0 { return }
+	if cur, err := os.ReadFile(logFilePath(app.todayLogsDate)); err == nil && len(cur) > 0 {
+		return // 新格式已有内容，避免重复导入
+	}
+	app.openLogFile()
+	if app.logEnc == nil { return }
+	ok := true
+	for _, e := range result.Entries {
+		if app.logEnc.Encode(e) != nil { ok = false; break }
+	}
+	app.closeLogFile()
+	if ok {
+		os.Remove(legacyLogFilePath(app.todayLogsDate))
+	} else {
+		// 迁移不完整：丢弃半成品，保留旧文件下次启动重试
+		os.Remove(logFilePath(app.todayLogsDate))
+		log.Printf("日志迁移失败，已保留旧格式文件")
+	}
+}
+
+// logDownloadStart 记录下载开始：同源连续轮次不重复记录（进度由 addProgress 聚合）
+func (app *App) logDownloadStart(u string) {
+	if app.progress.url == u && app.progress.count > 0 { return }
+	app.flushProgress()
+	app.progress.url = u
+	app.addLog("开始下载: " + u)
+}
+
+// addProgress 聚合同源连续完成的下载，窗口期满输出一条合并日志，
+// 避免高频小文件场景每秒产生"开始下载/下载完成"刷屏
+func (app *App) addProgress(u string, n uint64) {
+	if app.progress.url != u {
+		app.flushProgress()
+		app.progress.url = u
+	}
+	app.progress.count++
+	app.progress.bytes += n
+	if time.Since(app.progress.lastFlush) >= progressWindow { app.flushProgress() }
+}
+
+// flushProgress 立即输出当前聚合窗口的下载完成情况
+func (app *App) flushProgress() {
+	p := &app.progress
+	p.lastFlush = time.Now()
+	if p.count == 0 { return }
+	count, total := p.count, p.bytes
+	p.count, p.bytes = 0, 0
+	if count == 1 {
+		app.addLog(fmt.Sprintf("下载完成: %s", formatBytes(total)))
+	} else {
+		app.addLog(fmt.Sprintf("下载完成: %s × %d 次", formatBytes(total), count))
 	}
 }
 
@@ -391,11 +555,7 @@ func (app *App) getLogDates() []string {
 	files, err := os.ReadDir(logsDir)
 	if err == nil {
 		for _, f := range files {
-			name := f.Name()
-			if strings.HasPrefix(name, "log-") && strings.HasSuffix(name, ".json") {
-				date := strings.TrimPrefix(strings.TrimSuffix(name, ".json"), "log-")
-				dateSet[date] = true
-			}
+			if date, ok := logDateOf(f.Name()); ok { dateSet[date] = true }
 		}
 	}
 	dates := make([]string, 0, len(dateSet))
@@ -408,13 +568,10 @@ func (app *App) getLogDates() []string {
 func (app *App) cleanOldLogs() {
 	cutoff := time.Now().AddDate(0, 0, -7).Format("2006-01-02")
 	files, err := os.ReadDir(logsDir)
-	if err != nil { return }
-	for _, f := range files {
-		name := f.Name()
-		if strings.HasPrefix(name, "log-") && strings.HasSuffix(name, ".json") {
-			date := strings.TrimPrefix(strings.TrimSuffix(name, ".json"), "log-")
-			if date < cutoff {
-				os.Remove(filepath.Join(logsDir, name))
+	if err == nil {
+		for _, f := range files {
+			if date, ok := logDateOf(f.Name()); ok && date < cutoff {
+				os.Remove(filepath.Join(logsDir, f.Name()))
 				app.addLog("已清理过期日志: " + date)
 			}
 		}
@@ -439,7 +596,7 @@ func (app *App) rollTodayQuota() {
 func (app *App) checkDateChange() {
 	today := time.Now().Format("2006-01-02")
 	if app.stats.TodayDate == today { return }
-	app.saveTodayLogs()
+	app.closeLogFile() // 昨日条目已逐条追加，冲缓冲关闭，下次 addLog 打开新日期文件
 	if app.stats.TodayDate != "" && app.stats.TodayBytes > 0 {
 		app.stats.Daily[app.stats.TodayDate] = app.stats.TodayBytes
 	}
@@ -502,6 +659,24 @@ var userAgents = []string{
 	"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0",
 	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
 }
+
+// downloadTransport 全局复用：http.Transport 持有的空闲连接随其自身生命周期管理，
+// 每次下载新建 Transport 会导致连接与 readLoop/writeLoop goroutine 累积泄漏
+// （修复前实测：高频小文件场景 100 秒内泄漏 239 对 goroutine，内存涨至 173 MB）。
+var downloadTransport = &http.Transport{
+	DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+	TLSHandshakeTimeout:   10 * time.Second,
+	ResponseHeaderTimeout: 30 * time.Second,
+	IdleConnTimeout:       90 * time.Second,
+	MaxIdleConns:          8,
+	MaxIdleConnsPerHost:   2,
+}
+
+// downloadClient 下载专用客户端，不设整体 Timeout（原因见 doDownload）
+var downloadClient = &http.Client{Transport: downloadTransport}
+
+// downloadBuf 下载读缓冲：doDownload 仅由 downloadWorker 串行调用，复用避免每次 256KB 分配
+var downloadBuf = make([]byte, 256*1024)
 
 // pickNextURL 选源。triggeredBySlow=true 表示慢切换触发（候选={normal,unknown}，无候选返回 nil）；
 // false 表示 EOF 后新轮次（优先 {normal,unknown}，无则用 slow 兑底，failed 不选）。
@@ -581,8 +756,12 @@ func (app *App) downloadWorker() {
 			if !allowed {
 				app.mu.Lock()
 				if transient {
-					// DNS 瞬时失败：只跳过本轮，不持久化 failed，避免网络抖动误杀源
-					app.addLog("暂时无法解析域名，本轮跳过: " + u)
+					// DNS 瞬时失败：只跳过本轮，不持久化 failed，避免网络抖动误杀源；
+					// 限频记录，防止休息被禁用的配置下刷屏
+					if time.Since(app.lastDNSSkipLog) > time.Minute {
+						app.lastDNSSkipLog = time.Now()
+						app.addLog("暂时无法解析域名，本轮跳过: " + u)
+					}
 				} else {
 					app.addLog("URL 不安全，已跳过: " + u)
 					if e := app.findURLEntry(u); e != nil { e.Status = statusFailed }
@@ -600,7 +779,7 @@ func (app *App) downloadWorker() {
 			app.sessionSlowTriggered = false
 			app.noCandidateNotified = false
 			app.status = "running"; app.shouldStop.Store(false)
-			app.addLog("开始下载: " + u)
+			app.logDownloadStart(u)
 			app.mu.Unlock()
 
 			downloaded, err := app.doDownload(u)
@@ -636,7 +815,7 @@ func (app *App) downloadWorker() {
 					// 本次下载期间触发过慢判定且未达标，保持原状态
 					app.addLog(fmt.Sprintf("下载完成但低速未恢复: %s", formatBytes(downloaded)))
 				} else {
-					app.addLog(fmt.Sprintf("下载完成: %s", formatBytes(downloaded)))
+					app.addProgress(u, downloaded) // 聚合输出，避免高频小文件刷屏
 					if curEntry != nil { curEntry.Status = statusNormal; curEntry.Attempts = 0 }
 					app.saveConfig()
 				}
@@ -653,14 +832,15 @@ func (app *App) downloadWorker() {
 		if !app.isRunning.Load() { continue }
 		if slowSwitched { continue } // 慢切换已换源，不睡觉直接下一轮
 
-		// 休息逻辑
+		// 休息逻辑（sleepSec==0 时不记日志，防止连续下载配置下刷屏）
 		if !succeeded && !sleepDisabled {
 			if sleepMax < sleepMin { sleepMax = sleepMin }
 			sleepMinSec := sleepMin * 60; sleepMaxSec := sleepMax * 60
 			sleepSec := sleepMinSec
 			if sleepMaxSec > sleepMinSec { sleepSec = rand.Intn(sleepMaxSec-sleepMinSec) + sleepMinSec }
 			app.mu.Lock(); app.status = "sleeping"
-			app.addLog(fmt.Sprintf("所有地址均失败，休息 %d 分 %d 秒", sleepSec/60, sleepSec%60)); app.mu.Unlock()
+			if sleepSec > 0 { app.addLog(fmt.Sprintf("所有地址均失败，休息 %d 分 %d 秒", sleepSec/60, sleepSec%60)) }
+			app.mu.Unlock()
 			app.sleepWithCheck(sleepSec)
 		} else if succeeded && !sleepDisabled {
 			if sleepMax < sleepMin { sleepMax = sleepMin }
@@ -668,7 +848,8 @@ func (app *App) downloadWorker() {
 			sleepSec := sleepMinSec
 			if sleepMaxSec > sleepMinSec { sleepSec = rand.Intn(sleepMaxSec-sleepMinSec) + sleepMinSec }
 			app.mu.Lock(); app.status = "sleeping"
-			app.addLog(fmt.Sprintf("休息 %d 分 %d 秒", sleepSec/60, sleepSec%60)); app.mu.Unlock()
+			if sleepSec > 0 { app.addLog(fmt.Sprintf("休息 %d 分 %d 秒", sleepSec/60, sleepSec%60)) }
+			app.mu.Unlock()
 			app.sleepWithCheck(sleepSec)
 		}
 	}
@@ -679,26 +860,18 @@ func (app *App) downloadWorker() {
 func (app *App) doDownload(url string) (uint64, error) {
 	// 不设 Client.Timeout：它覆盖含读 body 的端到端总时长，大文件 × 低限速（如 3GB @ 2Mbps）
 	// 会被整体误杀并把源标 failed。连接/握手/等首包各有超时，body 读取由调度/限额/shouldStop 控制。
-	client := &http.Client{
-		Transport: &http.Transport{
-			DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ResponseHeaderTimeout: 30 * time.Second,
-			IdleConnTimeout:       90 * time.Second,
-			DisableKeepAlives:     false,
-		},
-	}
+	// 复用包级 downloadClient / downloadBuf，避免连接与缓冲随每次下载泄漏/重建。
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil { return 0, err }
 	req.Header.Set("User-Agent", userAgents[rand.Intn(len(userAgents))])
 	req.Header.Set("Cache-Control", "no-cache")
 
-	resp, err := client.Do(req)
+	resp, err := downloadClient.Do(req)
 	if err != nil { return 0, err }
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 { return 0, fmt.Errorf("HTTP %d", resp.StatusCode) }
 
-	buf := make([]byte, 256*1024)
+	buf := downloadBuf
 	var total uint64; var chunkBytes int64; chunkStart := time.Now()
 	limitMbps := app.currentSpeedLimit.Load()
 	bytesPerSec := limitMbps * 1_000_000 / 8
@@ -741,8 +914,13 @@ func (app *App) speedTracker() {
 		if delta > 0 { app.stats.TodayBytes += delta }
 		app.checkDateChange()
 		mbps := float64(speedBytes) * 8 / 1e6
-		if !app.isRunning.Load() { mbps = 0 }
+		if !app.isRunning.Load() || app.status != "running" {
+			// 非下载态（休眠/停止/调度外/限额外）记 -1 哨兵：慢判定跳过，
+			// 避免空闲秒被误计为低速导致误切换
+			mbps = -1
+		}
 		app.speedMbps = mbps
+		if app.speedMbps < 0 { app.speedMbps = 0 } // 实时速率对前端展示为 0
 		app.speedHistory = append(app.speedHistory, mbps)
 		if len(app.speedHistory) > 60 { app.speedHistory = app.speedHistory[len(app.speedHistory)-60:] }
 		if app.isRunning.Load() {
@@ -754,14 +932,27 @@ func (app *App) speedTracker() {
 	}
 }
 
-// autoSaver 每 60 秒定时持久化统计和日志
+// autoSaver 每 60 秒定时持久化统计并刷日志缓冲（saveStats 对无变化内容自动跳过）
 func (app *App) autoSaver() {
 	for range time.NewTicker(60 * time.Second).C {
 		app.mu.Lock()
 		app.saveStats()
-		app.saveTodayLogs()
+		app.flushLogs()
 		app.mu.Unlock()
 	}
+}
+
+// lowSpeedRatio 统计有效采样中低于 minSpeed 的秒数占比（-1 为空闲哨兵，跳过），
+// 返回百分整数；无有效采样返回 0（不触发切换）。
+func lowSpeedRatio(hist []float64, minSpeed int) int {
+	var low, valid int
+	for _, v := range hist {
+		if v < 0 { continue }
+		valid++
+		if v < float64(minSpeed) { low++ }
+	}
+	if valid == 0 { return 0 }
+	return low * 100 / valid
 }
 
 // slowSwitchJudge 每 5 秒检测当前下载源是否持续低速，必要时触发切换。
@@ -783,13 +974,8 @@ func (app *App) slowSwitchJudge() {
 		copy(hist, app.speedHistory)
 		app.mu.Unlock()
 
-		// 统计低速秒数占比
-		var lowCount int
-		for _, v := range hist {
-			if float64(v) < float64(minSpeed) { lowCount++ }
-		}
-		ratio := 0
-		if len(hist) > 0 { ratio = lowCount * 100 / len(hist) }
+		// 统计低速秒数占比（跳过空闲哨兵，见 lowSpeedRatio）
+		ratio := lowSpeedRatio(hist, minSpeed)
 		if ratio <= threshold { continue } // 不慢
 
 		app.mu.Lock()
@@ -837,9 +1023,14 @@ func (app *App) handleStatus(w http.ResponseWriter, r *http.Request) {
 	app.mu.Lock(); defer app.mu.Unlock()
 	var uptime int64
 	if app.isRunning.Load() { uptime = int64(time.Since(app.startedAt).Seconds()) }
+	hist := make([]float64, len(app.speedHistory))
+	for i, v := range app.speedHistory {
+		if v < 0 { v = 0 } // 空闲哨兵对前端图表按 0 展示
+		hist[i] = v
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status": app.status, "speed_mbps": app.speedMbps, "speed_history": app.speedHistory,
+		"status": app.status, "speed_mbps": app.speedMbps, "speed_history": hist,
 		"today_bytes": app.stats.TodayBytes, "today_date": app.stats.TodayDate,
 		"today_quota_gb": app.stats.TodayQuotaGB, "uptime_seconds": uptime,
 	})
@@ -855,10 +1046,11 @@ func (app *App) handleToggle(w http.ResponseWriter, r *http.Request) {
 	} else {
 		app.status = "stopped"; app.shouldStop.Store(true); app.speedMbps = 0
 		app.currentURL = ""; app.shouldSwitch.Store(false)
+		downloadTransport.CloseIdleConnections() // 立即释放空闲连接占用的 TLS 内存与 goroutine
 		app.addLog("服务已停止")
 	}
 	app.stats.Enabled = nowRunning
-	app.saveStats(); app.saveTodayLogs()
+	app.saveStats(); app.flushLogs()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]bool{"is_running": nowRunning})
 }
@@ -898,11 +1090,14 @@ func (app *App) handleLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	app.mu.Lock(); defer app.mu.Unlock()
 	var entries []LogEntry
-	if date == "" || date == app.todayLogsDate { entries = app.todayLogs } else { entries = app.loadLogsFromFile(date) }
+	if date == "" || date == app.todayLogsDate { entries = app.todayLogs } else { entries = loadLogsFromFile(date) }
 	if entries == nil { entries = []LogEntry{} }
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"entries": entries})
 }
+
+// testClient 源探测专用客户端：底层 DefaultTransport 全局共享，包级复用避免每次请求新建
+var testClient = &http.Client{Timeout: 10 * time.Second}
 
 // handleTestURL 探测指定 URL 的可达性（GET + Range 只取 1 字节）。
 // 测试结果同步更新 URL 状态：通过则 failed/unknown→normal（slow 不变）；失败则 normal/unknown→failed（slow/failed 不变）。
@@ -923,7 +1118,6 @@ func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
 		respondTest(false)
 		return
 	}
-	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		app.applyTestResult(rawURL, false)
@@ -932,7 +1126,7 @@ func (app *App) handleTestURL(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Set("Range", "bytes=0-0")
 	req.Header.Set("User-Agent", userAgents[rand.Intn(len(userAgents))])
-	resp, err := client.Do(req)
+	resp, err := testClient.Do(req)
 	if err != nil {
 		app.applyTestResult(rawURL, false)
 		respondTest(false)
@@ -1128,7 +1322,6 @@ func formatBytes(b uint64) string {
 // main 初始化应用、恢复状态、注册路由、启动 HTTP 服务
 func main() {
 	setLowPriority()
-	debug.SetGCPercent(200)
 
 	os.MkdirAll(dataDir, 0755)
 	os.MkdirAll(logsDir, 0755)
@@ -1142,7 +1335,9 @@ func main() {
 	app.loadConfig()
 	app.loadStats()
 
-	if entries := app.loadLogsFromFile(app.todayLogsDate); entries != nil {
+	// 旧版整文件日志先迁移为 JSONL 追加格式，再加载当日条目
+	app.migrateLegacyTodayLog()
+	if entries := loadLogsFromFile(app.todayLogsDate); entries != nil {
 		app.todayLogs = entries
 	}
 
@@ -1160,8 +1355,6 @@ func main() {
 	} else {
 		app.addLog("DownOnly 初始化完成")
 	}
-
-	app.saveTodayLogs()
 
 	go app.downloadWorker()
 	go app.speedTracker()
@@ -1213,7 +1406,7 @@ func main() {
 		app.stats.TodayBytes += delta
 		app.addLog("收到退出信号，正在保存")
 		app.saveStats()
-		app.saveTodayLogs()
+		app.closeLogFile()
 		app.mu.Unlock()
 		os.Exit(0)
 	}()

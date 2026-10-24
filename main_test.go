@@ -1,11 +1,18 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // chdirTemp 切换到临时目录并返回还原函数（测试串行执行，无并行冲突）
@@ -522,4 +529,344 @@ func TestWriteFileAtomic(t *testing.T) {
 	if len(leftovers) != 0 {
 		t.Errorf("temp files leaked: %v", leftovers)
 	}
+}
+
+// --- issue #13：持久化写放大与内存优化回归测试 ---
+
+// TestSaveConfigDedup 回归：内容未变时 saveConfig 不得写盘
+// （修复前下载热循环每秒重写 config.json 约 8 次，绝大多数内容与上次完全相同）
+func TestSaveConfigDedup(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(dataDir, 0755)
+	app := &App{}
+	app.config = defaultConfig()
+	app.fixConfig()
+	app.saveConfig()
+	if _, err := os.Stat(filepath.Join(dataDir, "config.json")); err != nil {
+		t.Fatalf("首次 saveConfig 应创建文件: %v", err)
+	}
+	// 内容未变：删除文件后再 saveConfig，不应重建
+	os.Remove(filepath.Join(dataDir, "config.json"))
+	app.saveConfig()
+	if _, err := os.Stat(filepath.Join(dataDir, "config.json")); !os.IsNotExist(err) {
+		t.Fatalf("内容未变时不应写盘, stat err=%v", err)
+	}
+	// 内容变化：恢复写盘
+	app.config.SpeedLimitMbps = 42
+	app.saveConfig()
+	data, err := os.ReadFile(filepath.Join(dataDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var c Config
+	if json.Unmarshal(data, &c) != nil || c.SpeedLimitMbps != 42 {
+		t.Errorf("内容变化后应写入新值, got %s", data)
+	}
+}
+
+// TestSaveStatsDedup 回归：内容未变时 saveStats 不得写盘（修复前空闲期每 60s 空写一次）
+func TestSaveStatsDedup(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(dataDir, 0755)
+	app := &App{}
+	app.stats = Stats{Daily: map[string]uint64{}, TodayDate: "2026-10-24"}
+	app.saveStats()
+	os.Remove(filepath.Join(dataDir, "stats.json"))
+	app.saveStats()
+	if _, err := os.Stat(filepath.Join(dataDir, "stats.json")); !os.IsNotExist(err) {
+		t.Fatal("内容未变时不应写盘")
+	}
+	app.stats.TodayBytes = 123
+	app.saveStats()
+	if _, err := os.Stat(filepath.Join(dataDir, "stats.json")); err != nil {
+		t.Fatal("内容变化后应写盘")
+	}
+}
+
+// TestAddLogAppendsJSONL 回归：日志逐条追加（不再整文件重写），文件与内存一致
+func TestAddLogAppendsJSONL(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(logsDir, 0755)
+	app := &App{todayLogsDate: "2026-10-24"}
+	for i := 0; i < 5; i++ {
+		app.addLog(fmt.Sprintf("条目 %d", i))
+	}
+	app.closeLogFile()
+	data, err := os.ReadFile(logFilePath("2026-10-24"))
+	if err != nil {
+		t.Fatalf("jsonl 未创建: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 5 {
+		t.Fatalf("want 5 lines, got %d", len(lines))
+	}
+	for _, line := range lines {
+		var e LogEntry
+		if json.Unmarshal([]byte(line), &e) != nil || e.Time == "" || e.Msg == "" {
+			t.Errorf("行不是合法 LogEntry: %q", line)
+		}
+	}
+	loaded := loadLogsFromFile("2026-10-24")
+	if len(loaded) != 5 || loaded[0].Msg != "条目 0" || loaded[4].Msg != "条目 4" {
+		t.Errorf("加载结果与写入不一致: %+v", loaded)
+	}
+}
+
+// TestLoadLogsLegacyCompat 验证旧版整文件 JSON 格式仍可读取
+func TestLoadLogsLegacyCompat(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(logsDir, 0755)
+	os.WriteFile(legacyLogFilePath("2026-10-23"),
+		[]byte(`{"entries":[{"time":"01:02:03","msg":"旧格式"}]}`), 0600)
+	entries := loadLogsFromFile("2026-10-23")
+	if len(entries) != 1 || entries[0].Msg != "旧格式" {
+		t.Fatalf("旧格式读取失败: %+v", entries)
+	}
+}
+
+// TestMigrateLegacyTodayLog 验证启动迁移：旧格式当日日志转 JSONL 后删除旧文件，且幂等
+func TestMigrateLegacyTodayLog(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(logsDir, 0755)
+	os.WriteFile(legacyLogFilePath("2026-10-24"),
+		[]byte(`{"entries":[{"time":"01:02:03","msg":"a"},{"time":"01:02:04","msg":"b"}]}`), 0600)
+	app := &App{todayLogsDate: "2026-10-24"}
+	app.migrateLegacyTodayLog()
+	if _, err := os.Stat(legacyLogFilePath("2026-10-24")); !os.IsNotExist(err) {
+		t.Error("旧文件应被删除")
+	}
+	if got := len(loadLogsFromFile("2026-10-24")); got != 2 {
+		t.Fatalf("迁移后应有 2 条, got %d", got)
+	}
+	// 旧文件已删，重复迁移应无操作
+	app.migrateLegacyTodayLog()
+	if got := len(loadLogsFromFile("2026-10-24")); got != 2 {
+		t.Fatalf("重复迁移不应重复导入, got %d", got)
+	}
+}
+
+// TestGetLogDatesDualSuffix 验证日期列表同时识别新版 .jsonl 与旧版 .json
+func TestGetLogDatesDualSuffix(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(logsDir, 0755)
+	os.WriteFile(logFilePath("2026-10-24"), []byte("\n"), 0600)
+	os.WriteFile(legacyLogFilePath("2026-10-23"), []byte("{}"), 0600)
+	app := &App{todayLogsDate: "2026-10-24"}
+	dates := app.getLogDates()
+	if len(dates) != 2 || dates[0] != "2026-10-24" || dates[1] != "2026-10-23" {
+		t.Errorf("日期列表错误: %v", dates)
+	}
+}
+
+// TestProgressAggregation 验证高频小文件的"下载完成"聚合输出与事件日志的时序
+func TestProgressAggregation(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(logsDir, 0755)
+	app := &App{todayLogsDate: "2026-10-24"}
+	for i := 0; i < 27; i++ {
+		app.addProgress("http://a", 2000)
+	}
+	if len(app.todayLogs) != 0 {
+		t.Fatalf("聚合窗口内不应产生日志, got %d 条", len(app.todayLogs))
+	}
+	app.flushProgress()
+	if len(app.todayLogs) != 1 {
+		t.Fatalf("聚合后应输出 1 条, got %d", len(app.todayLogs))
+	}
+	want := fmt.Sprintf("下载完成: %s × %d 次", formatBytes(27*2000), 27)
+	if app.todayLogs[0].Msg != want {
+		t.Errorf("got %q, want %q", app.todayLogs[0].Msg, want)
+	}
+	// 事件日志应先冲掉聚合中的进度，保持时序
+	app.addProgress("http://a", 100)
+	app.addLog("服务已停止")
+	if len(app.todayLogs) != 3 {
+		t.Fatalf("应有 3 条（聚合1+完成1+事件1), got %d", len(app.todayLogs))
+	}
+	if app.todayLogs[1].Msg != fmt.Sprintf("下载完成: %s", formatBytes(100)) {
+		t.Errorf("单条完成文案错误: %q", app.todayLogs[1].Msg)
+	}
+	if app.todayLogs[2].Msg != "服务已停止" {
+		t.Errorf("事件应在聚合之后: %q", app.todayLogs[2].Msg)
+	}
+	app.closeLogFile() // Windows 下必须关闭句柄，TempDir 才能清理
+}
+
+// TestLowSpeedRatioIgnoresIdle 回归：空闲哨兵不计入慢判定占比
+// （修复前休眠/空闲秒被计为低速，导致好源被误标 slow）
+func TestLowSpeedRatioIgnoresIdle(t *testing.T) {
+	hist := make([]float64, 60)
+	for i := 0; i < 30; i++ { hist[i] = -1 } // 30 秒空闲
+	for i := 30; i < 60; i++ { hist[i] = 0.5 } // 30 秒低速
+	if got := lowSpeedRatio(hist, 1); got != 100 {
+		t.Errorf("idle+low → got %d%%, want 100%%（空闲不应稀释占比）", got)
+	}
+	for i := range hist { hist[i] = -1 } // 全空闲
+	if got := lowSpeedRatio(hist, 1); got != 0 {
+		t.Errorf("all idle → got %d%%, want 0%%（不触发切换）", got)
+	}
+	for i := 0; i < 30; i++ { hist[i] = 5 } // 30 高速
+	for i := 30; i < 60; i++ { hist[i] = 0.5 } // 30 低速（无空闲）
+	if got := lowSpeedRatio(hist, 1); got != 50 {
+		t.Errorf("mixed → got %d%%, want 50%%", got)
+	}
+}
+
+// TestSpeedHistorySanitized 验证 handleStatus 输出的历史不含空闲哨兵负值
+func TestSpeedHistorySanitized(t *testing.T) {
+	app := &App{speedHistory: []float64{5, -1, -1, 3, 0}}
+	w := httptest.NewRecorder()
+	app.handleStatus(w, httptest.NewRequest("GET", "/api/status", nil))
+	var resp struct {
+		SpeedHistory []float64 `json:"speed_history"`
+		SpeedMbps    float64   `json:"speed_mbps"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	for i, v := range resp.SpeedHistory {
+		if v < 0 {
+			t.Fatalf("speed_history[%d]=%v 含负值: %v", i, v, resp.SpeedHistory)
+		}
+	}
+	if resp.SpeedHistory[1] != 0 || resp.SpeedHistory[2] != 0 {
+		t.Errorf("哨兵应输出为 0: %v", resp.SpeedHistory)
+	}
+}
+
+// TestTransportReuse 回归：复用包级 Transport 后连续下载不泄漏 goroutine
+// （修复前每次 doDownload 新建 Transport，100 秒内泄漏 239 对 readLoop/writeLoop）
+func TestTransportReuse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("hello-downonly"))
+	}))
+	defer srv.Close()
+
+	app := &App{}
+	app.isRunning.Store(true)
+	app.currentSpeedLimit.Store(int64(100))
+
+	if _, err := app.doDownload(srv.URL); err != nil {
+		t.Fatalf("first download: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond) // 等连接的 readLoop/writeLoop 稳定，计入基线
+	base := runtime.NumGoroutine()
+
+	for i := 0; i < 20; i++ {
+		if _, err := app.doDownload(srv.URL); err != nil {
+			t.Fatalf("download %d: %v", i, err)
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	if grew := runtime.NumGoroutine() - base; grew > 4 {
+		t.Errorf("goroutine 增长 %d（复用 Transport 应≈0），存在连接泄漏", grew)
+	}
+}
+
+// errWriter 模拟磁盘满等底层写失败
+type errWriter struct{}
+
+func (errWriter) Write(p []byte) (int, error) { return 0, errors.New("disk full") }
+
+// TestAddLogWriteErrorDropsHandle 回归：日志写入失败后必须丢弃句柄下次重开，
+// 否则 bufio 粘性错误会让当天文件日志静默失效（只有日期切换才恢复）
+func TestAddLogWriteErrorDropsHandle(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(logsDir, 0755)
+	app := &App{todayLogsDate: "2026-10-24"}
+	app.addLog("正常条目A")
+	app.closeLogFile()
+
+	// 注入必失败的底层写入器；超缓冲大条目迫使 Encode 立即触发底层写并报错
+	app.logBuf = bufio.NewWriter(errWriter{})
+	app.logEnc = json.NewEncoder(app.logBuf)
+	app.addLog(strings.Repeat("x", 8192))
+	if app.logEnc != nil {
+		t.Fatal("写入失败后应丢弃句柄")
+	}
+
+	app.addLog("恢复条目B")
+	app.closeLogFile()
+	data, err := os.ReadFile(logFilePath("2026-10-24"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "正常条目A") || !strings.Contains(string(data), "恢复条目B") {
+		t.Errorf("恢复后应继续追加真实文件: %s", data)
+	}
+}
+
+// TestCheckDateChangeRollover 回归：日期切换时昨日文件封存、
+// 新条目写入新日期文件、内存与流量归档同步切换
+func TestCheckDateChangeRollover(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(dataDir, 0755)
+	os.MkdirAll(logsDir, 0755)
+	yesterday := time.Now().AddDate(0, 0, -1).Format("2006-01-02")
+	today := time.Now().Format("2006-01-02")
+	app := &App{
+		todayLogsDate: yesterday,
+		stats:         Stats{Daily: map[string]uint64{}, TodayDate: yesterday, TodayBytes: 123},
+	}
+	app.config = defaultConfig()
+	app.addLog("昨日条目")
+	app.checkDateChange()
+	app.flushLogs() // 当日新文件仍在缓冲中
+
+	yData, err := os.ReadFile(logFilePath(yesterday))
+	if err != nil || !strings.Contains(string(yData), "昨日条目") {
+		t.Errorf("昨日文件应保留条目: %q, %v", yData, err)
+	}
+	tData, err := os.ReadFile(logFilePath(today))
+	if err != nil || !strings.Contains(string(tData), "日期更新") {
+		t.Errorf("新日期文件应收到日期更新日志: %q, %v", tData, err)
+	}
+	if app.todayLogsDate != today || len(app.todayLogs) == 0 {
+		t.Errorf("内存应切换到新日期: date=%q logs=%d", app.todayLogsDate, len(app.todayLogs))
+	}
+	if app.stats.Daily[yesterday] != 123 || app.stats.TodayBytes != 0 {
+		t.Errorf("昨日流量应归档: daily=%v today=%d", app.stats.Daily, app.stats.TodayBytes)
+	}
+	app.closeLogFile()
+}
+
+// TestLoadLogsTailCap 验证加载超过上限的历史日志时只保留最近 logCap 条
+func TestLoadLogsTailCap(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(logsDir, 0755)
+	var b strings.Builder
+	for i := 0; i < logCap+5; i++ {
+		fmt.Fprintf(&b, "{\"time\":\"00:00:00\",\"msg\":\"%d\"}\n", i)
+	}
+	if err := os.WriteFile(logFilePath("2026-10-24"), []byte(b.String()), 0600); err != nil {
+		t.Fatal(err)
+	}
+	entries := loadLogsFromFile("2026-10-24")
+	if len(entries) != logCap {
+		t.Fatalf("want %d entries, got %d", logCap, len(entries))
+	}
+	if entries[0].Msg != "5" {
+		t.Errorf("应保留最后 %d 条, first=%q", logCap, entries[0].Msg)
+	}
+}
+
+// TestLogDownloadStartSuppress 验证同源连续轮次不重复记录"开始下载"，换源时先冲聚合
+func TestLogDownloadStartSuppress(t *testing.T) {
+	chdirTemp(t)
+	os.MkdirAll(logsDir, 0755)
+	app := &App{todayLogsDate: "2026-10-24"}
+	app.logDownloadStart("http://a")
+	app.addProgress("http://a", 10)
+	app.logDownloadStart("http://a") // 同源连续轮次：不重复记录
+	if len(app.todayLogs) != 1 {
+		t.Fatalf("同源重复开始不应记录, got %d 条", len(app.todayLogs))
+	}
+	app.logDownloadStart("http://b") // 换源：先输出聚合再记录
+	if len(app.todayLogs) != 3 {
+		t.Fatalf("换源应输出聚合+开始共 3 条, got %d", len(app.todayLogs))
+	}
+	if app.todayLogs[1].Msg != fmt.Sprintf("下载完成: %s", formatBytes(10)) {
+		t.Errorf("聚合应在开始日志之前: %q", app.todayLogs[1].Msg)
+	}
+	app.closeLogFile()
 }
